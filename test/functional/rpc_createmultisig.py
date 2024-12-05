@@ -12,6 +12,7 @@ from test_framework.address import address_to_scriptpubkey
 from test_framework.descriptors import descsum_create, drop_origins
 from test_framework.key import ECPubKey
 from test_framework.messages import COIN
+from test_framework.script_util import keys_to_multisig_script
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_raises_rpc_error,
@@ -46,7 +47,7 @@ class RpcCreateMultiSigTest(BitcoinTestFramework):
         return node.get_wallet_rpc(wallet_name)
 
     def run_test(self):
-        node0, node1, node2 = self.nodes
+        node0, node1, _node2 = self.nodes
         self.wallet = MiniWallet(test_node=node0)
 
         if self.is_wallet_compiled():
@@ -68,6 +69,16 @@ class RpcCreateMultiSigTest(BitcoinTestFramework):
 
         # Check that bech32m is currently not allowed
         assert_raises_rpc_error(-5, "createmultisig cannot create bech32m multisig addresses", self.nodes[0].createmultisig, 2, self.pub, "bech32m")
+
+        self.log.info('Check correct encoding of multisig script for all n (1..20)')
+        for nkeys in range(1, 20+1):
+            keys = [self.pub[0]]*nkeys
+            expected_ms_script = keys_to_multisig_script(keys, k=nkeys)  # simply use n-of-n
+            # note that the 'legacy' address type fails for n values larger than 15
+            # due to exceeding the P2SH size limit (520 bytes), so we use 'bech32' instead
+            # (for the purpose of this encoding test, we don't care about the resulting address)
+            res = self.nodes[0].createmultisig(nrequired=nkeys, keys=keys, address_type='bech32')
+            assert_equal(res['redeemScript'], expected_ms_script.hex())
 
     def check_addmultisigaddress_errors(self):
         if self.options.descriptors:
@@ -111,7 +122,7 @@ class RpcCreateMultiSigTest(BitcoinTestFramework):
             assert_raises_rpc_error(-4, "Unsupported multisig script size for legacy wallet. Upgrade to descriptors to overcome this limitation for p2sh-segwit or bech32 scripts", wallet_multi.addmultisigaddress, 16, pubkeys, '', 'bech32')
 
     def do_multisig(self, nkeys, nsigs, output_type, wallet_multi):
-        node0, node1, node2 = self.nodes
+        node0, _node1, node2 = self.nodes
         pub_keys = self.pub[0: nkeys]
         priv_keys = self.priv[0: nkeys]
 
@@ -183,12 +194,18 @@ class RpcCreateMultiSigTest(BitcoinTestFramework):
         assert_raises_rpc_error(-8, "redeemScript/witnessScript does not match scriptPubKey", node2.signrawtransactionwithkey, rawtx, priv_keys[0:nsigs-1], [prevtx_err])
 
         rawtx2 = node2.signrawtransactionwithkey(rawtx, priv_keys[0:nsigs - 1], prevtxs)
-        rawtx3 = node2.signrawtransactionwithkey(rawtx2["hex"], [priv_keys[-1]], prevtxs)
-        assert rawtx3['complete']
+        assert_equal(rawtx2["complete"], False)
+        rawtx3 = node2.signrawtransactionwithkey(rawtx, [priv_keys[-1]], prevtxs)
+        assert_equal(rawtx3["complete"], False)
+        assert_raises_rpc_error(-22, "TX decode failed", node2.combinerawtransaction, [rawtx2['hex'], rawtx3['hex'] + "00"])
+        assert_raises_rpc_error(-22, "Missing transactions", node2.combinerawtransaction, [])
+        combined_rawtx = node2.combinerawtransaction([rawtx2["hex"], rawtx3["hex"]])
 
-        tx = node0.sendrawtransaction(rawtx3["hex"], 0)
+        tx = node0.sendrawtransaction(combined_rawtx, 0)
         blk = self.generate(node0, 1)[0]
         assert tx in node0.getblock(blk)["tx"]
+
+        assert_raises_rpc_error(-25, "Input not found or already spent", node2.combinerawtransaction, [rawtx2['hex'], rawtx3['hex']])
 
         # When the wallet is enabled, assert node2 sees the incoming amount
         if self.is_wallet_compiled():
@@ -246,4 +263,4 @@ class RpcCreateMultiSigTest(BitcoinTestFramework):
 
 
 if __name__ == '__main__':
-    RpcCreateMultiSigTest().main()
+    RpcCreateMultiSigTest(__file__).main()

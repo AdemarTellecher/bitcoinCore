@@ -369,8 +369,16 @@ class RPCPackagesTest(BitcoinTestFramework):
     def test_submitpackage(self):
         node = self.nodes[0]
 
-        self.log.info("Submitpackage valid packages with 1 child and some number of parents")
-        for num_parents in [1, 2, 24]:
+        self.log.info("Submitpackage only allows valid hex inputs")
+        valid_tx_list = self.wallet.create_self_transfer_chain(chain_length=2)
+        hex_list = [valid_tx_list[0]["hex"][:-1] + 'X', valid_tx_list[1]["hex"]]
+        txid_list = [valid_tx_list[0]["txid"], valid_tx_list[1]["txid"]]
+        assert_raises_rpc_error(-22, "TX decode failed:", node.submitpackage, hex_list)
+        assert txid_list[0] not in node.getrawmempool()
+        assert txid_list[1] not in node.getrawmempool()
+
+        self.log.info("Submitpackage valid packages with 1 child and some number of parents (or none)")
+        for num_parents in [0, 1, 2, 24]:
             self.test_submit_child_with_parents(num_parents, False)
             self.test_submit_child_with_parents(num_parents, True)
 
@@ -381,10 +389,9 @@ class RPCPackagesTest(BitcoinTestFramework):
         assert_raises_rpc_error(-25, "package topology disallowed", node.submitpackage, chain_hex)
         assert_equal(legacy_pool, node.getrawmempool())
 
-        assert_raises_rpc_error(-8, f"Array must contain between 2 and {MAX_PACKAGE_COUNT} transactions.", node.submitpackage, [])
-        assert_raises_rpc_error(-8, f"Array must contain between 2 and {MAX_PACKAGE_COUNT} transactions.", node.submitpackage, [chain_hex[0]] * 1)
+        assert_raises_rpc_error(-8, f"Array must contain between 1 and {MAX_PACKAGE_COUNT} transactions.", node.submitpackage, [])
         assert_raises_rpc_error(
-            -8, f"Array must contain between 2 and {MAX_PACKAGE_COUNT} transactions.",
+            -8, f"Array must contain between 1 and {MAX_PACKAGE_COUNT} transactions.",
             node.submitpackage, [chain_hex[0]] * (MAX_PACKAGE_COUNT + 1)
         )
 
@@ -394,7 +401,7 @@ class RPCPackagesTest(BitcoinTestFramework):
         peer = node.add_p2p_connection(P2PTxInvStore())
         txs = self.wallet.create_self_transfer_chain(chain_length=2)
         bad_child = tx_from_hex(txs[1]["hex"])
-        bad_child.nVersion = -1
+        bad_child.version = 0xffffffff
         hex_partial_acceptance = [txs[0]["hex"], bad_child.serialize().hex()]
         res = node.submitpackage(hex_partial_acceptance)
         assert_equal(res["package_msg"], "transaction failed")
@@ -489,4 +496,4 @@ class RPCPackagesTest(BitcoinTestFramework):
         assert_equal(node.getrawmempool(), [chained_txns_burn[0]["txid"]])
 
 if __name__ == "__main__":
-    RPCPackagesTest().main()
+    RPCPackagesTest(__file__).main()

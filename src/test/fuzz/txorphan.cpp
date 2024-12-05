@@ -1,4 +1,4 @@
-// Copyright (c) 2022 The Bitcoin Core developers
+// Copyright (c) 2022-present The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -37,11 +37,12 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
     SetMockTime(ConsumeTime(fuzzed_data_provider));
 
     TxOrphanage orphanage;
-    std::set<COutPoint> outpoints;
+    std::vector<COutPoint> outpoints; // Duplicates are tolerated
+    outpoints.reserve(200'000);
 
     // initial outpoints used to construct transactions later
     for (uint8_t i = 0; i < 4; i++) {
-        outpoints.emplace(Txid::FromUint256(uint256{i}), 0);
+        outpoints.emplace_back(Txid::FromUint256(uint256{i}), 0);
     }
 
     CTransactionRef ptx_potential_parent = nullptr;
@@ -55,19 +56,21 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
             const auto num_out = fuzzed_data_provider.ConsumeIntegralInRange<uint32_t>(1, 256);
             // pick outpoints from outpoints as input. We allow input duplicates on purpose, given we are not
             // running any transaction validation logic before adding transactions to the orphanage
+            tx_mut.vin.reserve(num_in);
             for (uint32_t i = 0; i < num_in; i++) {
                 auto& prevout = PickValue(fuzzed_data_provider, outpoints);
                 // try making transactions unique by setting a random nSequence, but allow duplicate transactions if they happen
                 tx_mut.vin.emplace_back(prevout, CScript{}, fuzzed_data_provider.ConsumeIntegralInRange<uint32_t>(0, CTxIn::SEQUENCE_FINAL));
             }
             // output amount will not affect txorphanage
+            tx_mut.vout.reserve(num_out);
             for (uint32_t i = 0; i < num_out; i++) {
                 tx_mut.vout.emplace_back(CAmount{0}, CScript{});
             }
             auto new_tx = MakeTransactionRef(tx_mut);
             // add newly constructed outpoints to the coin pool
             for (uint32_t i = 0; i < num_out; i++) {
-                outpoints.emplace(new_tx->GetHash(), i);
+                outpoints.emplace_back(new_tx->GetHash(), i);
             }
             return new_tx;
         }();
