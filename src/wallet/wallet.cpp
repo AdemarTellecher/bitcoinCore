@@ -1549,7 +1549,7 @@ void CWallet::blockDisconnected(const interfaces::BlockInfo& block)
     int disconnect_height = block.height;
 
     for (size_t index = 0; index < block.data->vtx.size(); index++) {
-        const CTransactionRef& ptx = Assert(block.data)->vtx[index];
+        const CTransactionRef& ptx = block.data->vtx[index];
         // Coinbase transactions are not only inactive but also abandoned,
         // meaning they should never be relayed standalone via the p2p protocol.
         SyncTransaction(ptx, TxStateInactive{/*abandoned=*/index == 0});
@@ -4534,13 +4534,13 @@ util::Result<MigrationResult> MigrateLegacyToDescriptor(std::shared_ptr<CWallet>
         // First change to using SQLite
         if (!local_wallet->MigrateToSQLite(error)) return util::Error{error};
 
-        // Do the migration of keys and scripts for non-blank wallets, and cleanup if it fails
-        success = local_wallet->IsWalletFlagSet(WALLET_FLAG_BLANK_WALLET);
-        if (!success) {
+        // Do the migration of keys and scripts for non-empty wallets, and cleanup if it fails
+        if (HasLegacyRecords(*local_wallet)) {
             success = DoMigration(*local_wallet, context, error, res);
         } else {
             // Make sure that descriptors flag is actually set
             local_wallet->SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+            success = true;
         }
     }
 
