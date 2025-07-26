@@ -1,6 +1,6 @@
 # Copyright (c) 2023-present The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
-# file COPYING or http://www.opensource.org/licenses/mit-license.php.
+# file COPYING or https://opensource.org/license/mit.
 
 name: CI
 on:
@@ -77,11 +77,11 @@ jobs:
           git config user.name "CI"
       - run: |
           sudo apt-get update
-          sudo apt-get install clang ccache build-essential cmake ninja-build pkgconf python3-zmq libevent-dev libboost-dev libsqlite3-dev systemtap-sdt-dev libzmq3-dev qt6-base-dev qt6-tools-dev qt6-l10n-tools libqrencode-dev -y
+          sudo apt-get install clang mold ccache build-essential cmake ninja-build pkgconf python3-zmq libevent-dev libboost-dev libsqlite3-dev systemtap-sdt-dev libzmq3-dev qt6-base-dev qt6-tools-dev qt6-l10n-tools libqrencode-dev -y
       - name: Compile and run tests
         run: |
           # Run tests on commits after the last merge commit and before the PR head commit
-          git rebase --exec "git merge --no-commit origin/${GITHUB_BASE_REF} && ./.github/ci-test-each-commit-exec.sh && git reset --hard" ${{ env.TEST_BASE }}
+          git rebase --exec "git merge --no-commit origin/${GITHUB_BASE_REF} && python3 ./.github/ci-test-each-commit-exec.py && git reset --hard" ${{ env.TEST_BASE }}
 
   macos-native-arm64:
     name: ${{ matrix.job-name }}
@@ -223,7 +223,7 @@ jobs:
 
       - name: Generate build system
         run: |
-          cmake -B build --preset vs2022 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_INSTALLATION_ROOT}/scripts/buildsystems/vcpkg.cmake" ${{ matrix.generate-options }}
+          cmake -B build -Werror=dev --preset vs2022 -DCMAKE_TOOLCHAIN_FILE="${VCPKG_INSTALLATION_ROOT}/scripts/buildsystems/vcpkg.cmake" ${{ matrix.generate-options }}
 
       - name: Save vcpkg binary cache
         uses: actions/cache/save@v4
@@ -236,6 +236,15 @@ jobs:
         working-directory: build
         run: |
           cmake --build . -j $NUMBER_OF_PROCESSORS --config Release
+
+      - name: Get bitcoind manifest
+        if: matrix.job-type == 'standard'
+        working-directory: build
+        run: |
+          mt.exe -nologo -inputresource:bin/Release/bitcoind.exe -out:bitcoind.manifest
+          cat bitcoind.manifest
+          echo
+          mt.exe -nologo -inputresource:bin/Release/bitcoind.exe -validate_manifest
 
       - name: Run test suite
         if: matrix.job-type == 'standard'
@@ -251,6 +260,7 @@ jobs:
         env:
           BITCOIND: '${{ github.workspace }}\build\bin\Release\bitcoind.exe'
           BITCOINCLI: '${{ github.workspace }}\build\bin\Release\bitcoin-cli.exe'
+          BITCOINTX: '${{ github.workspace }}\build\bin\Release\bitcoin-tx.exe'
           BITCOINUTIL: '${{ github.workspace }}\build\bin\Release\bitcoin-util.exe'
           BITCOINWALLET: '${{ github.workspace }}\build\bin\Release\bitcoin-wallet.exe'
           TEST_RUNNER_EXTRA: ${{ github.event_name != 'pull_request' && '--extended' || '' }}
@@ -347,6 +357,20 @@ jobs:
       - name: Run bitcoind.exe
         run: ./bin/bitcoind.exe -version
 
+      - name: Find mt.exe tool
+        shell: pwsh
+        run: |
+          $sdk_dir = (Get-ItemProperty 'HKLM:\SOFTWARE\Wow6432Node\Microsoft\Windows Kits\Installed Roots' -Name KitsRoot10).KitsRoot10
+          $sdk_latest = (Get-ChildItem "$sdk_dir\bin" -Directory | Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } | Sort-Object Name -Descending | Select-Object -First 1).Name
+          "MT_EXE=${sdk_dir}bin\${sdk_latest}\x64\mt.exe" >> $env:GITHUB_ENV
+
+      - name: Get bitcoind manifest
+        shell: pwsh
+        run: |
+          & $env:MT_EXE -nologo -inputresource:bin\bitcoind.exe -out:bitcoind.manifest
+          Get-Content bitcoind.manifest
+          & $env:MT_EXE -nologo -inputresource:bin\bitcoind.exe -validate_manifest
+
       - name: Run unit tests
         # Can't use ctest here like other jobs as we don't have a CMake build tree.
         run: |
@@ -366,16 +390,19 @@ jobs:
           (Get-Content "test/config.ini") -replace '(?<=^SRCDIR=).*', '${{ github.workspace }}' -replace '(?<=^BUILDDIR=).*', '${{ github.workspace }}' -replace '(?<=^RPCAUTH=).*', '${{ github.workspace }}/share/rpcauth/rpcauth.py' | Set-Content "test/config.ini"
           Get-Content "test/config.ini"
 
-      - name: Run util tests
-        run: py -3 test/util/test_runner.py
+      - name: Set previous release directory
+        run: |
+          echo "PREVIOUS_RELEASES_DIR=${{ runner.temp }}/previous_releases" >> "$GITHUB_ENV"
 
-      - name: Run rpcauth test
-        run: py -3 test/util/rpcauth-test.py
+      - name: Get previous releases
+        working-directory: test
+        run: ./get_previous_releases.py --target-dir $PREVIOUS_RELEASES_DIR
 
       - name: Run functional tests
         env:
           # TODO: Fix the excluded test and re-enable it.
-          EXCLUDE: '--exclude wallet_multiwallet.py'
+          # feature_unsupported_utxo_db.py fails on windows because of emojis in the test data directory
+          EXCLUDE: '--exclude wallet_multiwallet.py,feature_unsupported_utxo_db.py'
           TEST_RUNNER_EXTRA: ${{ github.event_name != 'pull_request' && '--extended' || '' }}
         run: py -3 test/functional/test_runner.py --jobs $NUMBER_OF_PROCESSORS --ci --quiet --tmpdirprefix="$RUNNER_TEMP" --combinedlogslen=99999999 --timeout-factor=$TEST_RUNNER_TIMEOUT_FACTOR $EXCLUDE $TEST_RUNNER_EXTRA
 

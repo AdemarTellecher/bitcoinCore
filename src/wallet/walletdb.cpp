@@ -16,6 +16,7 @@
 #include <util/bip32.h>
 #include <util/check.h>
 #include <util/fs.h>
+#include <util/transaction_identifier.h>
 #include <util/time.h>
 #include <util/translation.h>
 #include <wallet/migrate.h>
@@ -93,9 +94,9 @@ bool WalletBatch::WriteTx(const CWalletTx& wtx)
     return WriteIC(std::make_pair(DBKeys::TX, wtx.GetHash()), wtx);
 }
 
-bool WalletBatch::EraseTx(uint256 hash)
+bool WalletBatch::EraseTx(Txid hash)
 {
-    return EraseIC(std::make_pair(DBKeys::TX, hash));
+    return EraseIC(std::make_pair(DBKeys::TX, hash.ToUint256()));
 }
 
 bool WalletBatch::WriteKeyMetadata(const CKeyMetadata& meta, const CPubKey& pubkey, const bool overwrite)
@@ -446,6 +447,7 @@ static DBErrors LoadMinVersion(CWallet* pwallet, DatabaseBatch& batch) EXCLUSIVE
     AssertLockHeld(pwallet->cs_wallet);
     int nMinVersion = 0;
     if (batch.Read(DBKeys::MINVERSION, nMinVersion)) {
+        pwallet->WalletLogPrintf("Wallet file version = %d\n", nMinVersion);
         if (nMinVersion > FEATURE_LATEST)
             return DBErrors::TOO_NEW;
         pwallet->LoadMinVersion(nMinVersion);
@@ -539,7 +541,6 @@ bool HasLegacyRecords(CWallet& wallet, DatabaseBatch& batch)
         std::unique_ptr<DatabaseCursor> cursor = batch.GetNewPrefixCursor(prefix);
         if (!cursor) {
             // Could only happen on a closed db, which means there is an error in the code flow.
-            wallet.WalletLogPrintf("Error getting database cursor for '%s' records", type);
             throw std::runtime_error(strprintf("Error getting database cursor for '%s' records", type));
         }
 
@@ -1004,7 +1005,7 @@ static DBErrors LoadAddressBookRecords(CWallet* pwallet, DatabaseBatch& batch) E
     return result;
 }
 
-static DBErrors LoadTxRecords(CWallet* pwallet, DatabaseBatch& batch, std::vector<uint256>& upgraded_txs, bool& any_unordered) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet)
+static DBErrors LoadTxRecords(CWallet* pwallet, DatabaseBatch& batch, bool& any_unordered) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet)
 {
     AssertLockHeld(pwallet->cs_wallet);
     DBErrors result = DBErrors::LOAD_OK;
@@ -1012,9 +1013,9 @@ static DBErrors LoadTxRecords(CWallet* pwallet, DatabaseBatch& batch, std::vecto
     // Load tx record
     any_unordered = false;
     LoadResult tx_res = LoadRecords(pwallet, batch, DBKeys::TX,
-        [&any_unordered, &upgraded_txs] (CWallet* pwallet, DataStream& key, DataStream& value, std::string& err) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet) {
+        [&any_unordered] (CWallet* pwallet, DataStream& key, DataStream& value, std::string& err) EXCLUSIVE_LOCKS_REQUIRED(pwallet->cs_wallet) {
         DBErrors result = DBErrors::LOAD_OK;
-        uint256 hash;
+        Txid hash;
         key >> hash;
         // LoadToWallet call below creates a new CWalletTx that fill_wtx
         // callback fills with transaction metadata.
@@ -1028,27 +1029,6 @@ static DBErrors LoadTxRecords(CWallet* pwallet, DatabaseBatch& batch, std::vecto
             value >> wtx;
             if (wtx.GetHash() != hash)
                 return false;
-
-            // Undo serialize changes in 31600
-            if (31404 <= wtx.fTimeReceivedIsTxTime && wtx.fTimeReceivedIsTxTime <= 31703)
-            {
-                if (!value.empty())
-                {
-                    uint8_t fTmp;
-                    uint8_t fUnused;
-                    std::string unused_string;
-                    value >> fTmp >> fUnused >> unused_string;
-                    pwallet->WalletLogPrintf("LoadWallet() upgrading tx ver=%d %d %s\n",
-                                       wtx.fTimeReceivedIsTxTime, fTmp, hash.ToString());
-                    wtx.fTimeReceivedIsTxTime = fTmp;
-                }
-                else
-                {
-                    pwallet->WalletLogPrintf("LoadWallet() repairing tx ver=%d %s\n", wtx.fTimeReceivedIsTxTime, hash.ToString());
-                    wtx.fTimeReceivedIsTxTime = 0;
-                }
-                upgraded_txs.push_back(hash);
-            }
 
             if (wtx.nOrderPos == -1)
                 any_unordered = true;
@@ -1070,7 +1050,7 @@ static DBErrors LoadTxRecords(CWallet* pwallet, DatabaseBatch& batch, std::vecto
         uint32_t n;
         key >> hash;
         key >> n;
-        pwallet->LockCoin(COutPoint(hash, n));
+        pwallet->LoadLockedCoin(COutPoint(hash, n), /*persistent=*/true);
         return DBErrors::LOAD_OK;
     });
     result = std::max(result, locked_utxo_res.m_result);
@@ -1148,14 +1128,13 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
 {
     DBErrors result = DBErrors::LOAD_OK;
     bool any_unordered = false;
-    std::vector<uint256> upgraded_txs;
 
     LOCK(pwallet->cs_wallet);
 
     // Last client version to open this wallet
     int last_client = CLIENT_VERSION;
     bool has_last_client = m_batch->Read(DBKeys::VERSION, last_client);
-    pwallet->WalletLogPrintf("Wallet file version = %d, last client version = %d\n", pwallet->GetVersion(), last_client);
+    if (has_last_client) pwallet->WalletLogPrintf("Last client version = %d\n", last_client);
 
     try {
         if ((result = LoadMinVersion(pwallet, *m_batch)) != DBErrors::LOAD_OK) return result;
@@ -1184,17 +1163,23 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
         // Load address book
         result = std::max(LoadAddressBookRecords(pwallet, *m_batch), result);
 
-        // Load tx records
-        result = std::max(LoadTxRecords(pwallet, *m_batch, upgraded_txs, any_unordered), result);
-
         // Load SPKMs
         result = std::max(LoadActiveSPKMs(pwallet, *m_batch), result);
 
         // Load decryption keys
         result = std::max(LoadDecryptionKeys(pwallet, *m_batch), result);
-    } catch (...) {
+
+        // Load tx records
+        result = std::max(LoadTxRecords(pwallet, *m_batch, any_unordered), result);
+    } catch (std::runtime_error& e) {
         // Exceptions that can be ignored or treated as non-critical are handled by the individual loading functions.
         // Any uncaught exceptions will be caught here and treated as critical.
+        // Catch std::runtime_error specifically as many functions throw these and they at least have some message that
+        // we can log
+        pwallet->WalletLogPrintf("%s\n", e.what());
+        result = DBErrors::CORRUPT;
+    } catch (...) {
+        // All other exceptions are still problematic, but we can't log them
         result = DBErrors::CORRUPT;
     }
 
@@ -1202,9 +1187,6 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
     // upgrading, we don't want to make it worse.
     if (result != DBErrors::LOAD_OK)
         return result;
-
-    for (const uint256& hash : upgraded_txs)
-        WriteTx(pwallet->mapWallet.at(hash));
 
     if (!has_last_client || last_client != CLIENT_VERSION) // Update
         m_batch->Write(DBKeys::VERSION, CLIENT_VERSION);
@@ -1383,8 +1365,8 @@ std::unique_ptr<WalletDatabase> MakeDatabase(const fs::path& path, const Databas
 
     // BERKELEY_RO can only be opened if require_format was set, which only occurs in migration.
     if (format && format == DatabaseFormat::BERKELEY_RO && (!options.require_format || options.require_format != DatabaseFormat::BERKELEY_RO)) {
-        error = Untranslated(strprintf("Failed to open database path '%s'. The wallet appears to be a Legacy wallet, please use the wallet migration tool (migratewallet RPC).", fs::PathToString(path)));
-        status = DatabaseStatus::FAILED_BAD_FORMAT;
+        error = Untranslated(strprintf("Failed to open database path '%s'. The wallet appears to be a Legacy wallet, please use the wallet migration tool (migratewallet RPC or the GUI option).", fs::PathToString(path)));
+        status = DatabaseStatus::FAILED_LEGACY_DISABLED;
         return nullptr;
     }
 

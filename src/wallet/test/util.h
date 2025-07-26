@@ -104,11 +104,12 @@ public:
 
     void Open() override {}
 
-    bool Rewrite(const char* pszSkip=nullptr) override { return m_pass; }
+    bool Rewrite() override { return m_pass; }
     bool Backup(const std::string& strDest) const override { return m_pass; }
     void Close() override {}
 
     std::string Filename() override { return "mockable"; }
+    std::vector<fs::path> Files() override { return {}; }
     std::string Format() override { return "mock"; }
     std::unique_ptr<DatabaseBatch> MakeBatch() override { return std::make_unique<MockableBatch>(m_records, m_pass); }
 };
@@ -116,7 +117,7 @@ public:
 std::unique_ptr<WalletDatabase> CreateMockableWalletDatabase(MockableData records = {});
 MockableDatabase& GetMockableDatabase(CWallet& wallet);
 
-ScriptPubKeyMan* CreateDescriptor(CWallet& keystore, const std::string& desc_str, const bool success);
+DescriptorScriptPubKeyMan* CreateDescriptor(CWallet& keystore, const std::string& desc_str, const bool success);
 } // namespace wallet
 
 #endif // BITCOIN_WALLET_TEST_UTIL_H

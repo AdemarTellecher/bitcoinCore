@@ -37,12 +37,9 @@
 #include <util/translation.h>
 #include <util/vector.h>
 
-#ifdef WIN32
-#include <string.h>
-#endif
-
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -1889,7 +1886,7 @@ bool CConnman::AddConnection(const std::string& address, ConnectionType conn_typ
     if (max_connections != std::nullopt && existing_connections >= max_connections) return false;
 
     // Max total outbound connections already exist
-    CSemaphoreGrant grant(*semOutbound, true);
+    CountingSemaphoreGrant<> grant(*semOutbound, true);
     if (!grant) return false;
 
     OpenNetworkConnection(CAddress(), false, std::move(grant), address.c_str(), conn_type, /*use_v2transport=*/use_v2transport);
@@ -2405,7 +2402,7 @@ void CConnman::ProcessAddrFetch()
     // peer doesn't support it or immediately disconnects us for another reason.
     const bool use_v2transport(GetLocalServices() & NODE_P2P_V2);
     CAddress addr;
-    CSemaphoreGrant grant(*semOutbound, /*fTry=*/true);
+    CountingSemaphoreGrant<> grant(*semOutbound, /*fTry=*/true);
     if (grant) {
         OpenNetworkConnection(addr, false, std::move(grant), strDest.c_str(), ConnectionType::ADDR_FETCH, use_v2transport);
     }
@@ -2579,7 +2576,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
 
         PerformReconnections();
 
-        CSemaphoreGrant grant(*semOutbound);
+        CountingSemaphoreGrant<> grant(*semOutbound);
         if (interruptNet)
             return;
 
@@ -2957,7 +2954,7 @@ void CConnman::ThreadOpenAddedConnections()
     AssertLockNotHeld(m_reconnections_mutex);
     while (true)
     {
-        CSemaphoreGrant grant(*semAddnode);
+        CountingSemaphoreGrant<> grant(*semAddnode);
         std::vector<AddedNodeInfo> vInfo = GetAddedNodeInfo(/*include_connected=*/false);
         bool tried = false;
         for (const AddedNodeInfo& info : vInfo) {
@@ -2970,7 +2967,7 @@ void CConnman::ThreadOpenAddedConnections()
             CAddress addr(CService(), NODE_NONE);
             OpenNetworkConnection(addr, false, std::move(grant), info.m_params.m_added_node.c_str(), ConnectionType::MANUAL, info.m_params.m_use_v2transport);
             if (!interruptNet.sleep_for(std::chrono::milliseconds(500))) return;
-            grant = CSemaphoreGrant(*semAddnode, /*fTry=*/true);
+            grant = CountingSemaphoreGrant<>(*semAddnode, /*fTry=*/true);
         }
         // See if any reconnections are desired.
         PerformReconnections();
@@ -2981,7 +2978,7 @@ void CConnman::ThreadOpenAddedConnections()
 }
 
 // if successful, this moves the passed grant to the constructed node
-void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CSemaphoreGrant&& grant_outbound, const char *pszDest, ConnectionType conn_type, bool use_v2transport)
+void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFailure, CountingSemaphoreGrant<>&& grant_outbound, const char *pszDest, ConnectionType conn_type, bool use_v2transport)
 {
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
     assert(conn_type != ConnectionType::INBOUND);
@@ -3332,11 +3329,11 @@ bool CConnman::Start(CScheduler& scheduler, const Options& connOptions)
 
     if (semOutbound == nullptr) {
         // initialize semaphore
-        semOutbound = std::make_unique<CSemaphore>(std::min(m_max_automatic_outbound, m_max_automatic_connections));
+        semOutbound = std::make_unique<std::counting_semaphore<>>(std::min(m_max_automatic_outbound, m_max_automatic_connections));
     }
     if (semAddnode == nullptr) {
         // initialize semaphore
-        semAddnode = std::make_unique<CSemaphore>(m_max_addnode);
+        semAddnode = std::make_unique<std::counting_semaphore<>>(m_max_addnode);
     }
 
     //
@@ -3424,13 +3421,13 @@ void CConnman::Interrupt()
 
     if (semOutbound) {
         for (int i=0; i<m_max_automatic_outbound; i++) {
-            semOutbound->post();
+            semOutbound->release();
         }
     }
 
     if (semAddnode) {
         for (int i=0; i<m_max_addnode; i++) {
-            semAddnode->post();
+            semAddnode->release();
         }
     }
 }
@@ -3499,7 +3496,7 @@ CConnman::~CConnman()
     Stop();
 }
 
-std::vector<CAddress> CConnman::GetAddresses(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
+std::vector<CAddress> CConnman::GetAddressesUnsafe(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
 {
     std::vector<CAddress> addresses = addrman.GetAddr(max_addresses, max_pct, network, filtered);
     if (m_banman) {
@@ -3524,7 +3521,7 @@ std::vector<CAddress> CConnman::GetAddresses(CNode& requestor, size_t max_addres
     auto r = m_addr_response_caches.emplace(cache_id, CachedAddrResponse{});
     CachedAddrResponse& cache_entry = r.first->second;
     if (cache_entry.m_cache_entry_expiration < current_time) { // If emplace() added new one it has expiration 0.
-        cache_entry.m_addrs_response_cache = GetAddresses(max_addresses, max_pct, /*network=*/std::nullopt);
+        cache_entry.m_addrs_response_cache = GetAddressesUnsafe(max_addresses, max_pct, /*network=*/std::nullopt);
         // Choosing a proper cache lifetime is a trade-off between the privacy leak minimization
         // and the usefulness of ADDR responses to honest users.
         //
@@ -3967,8 +3964,8 @@ void CConnman::PerformReconnections()
 
 void CConnman::ASMapHealthCheck()
 {
-    const std::vector<CAddress> v4_addrs{GetAddresses(/*max_addresses=*/ 0, /*max_pct=*/ 0, Network::NET_IPV4, /*filtered=*/ false)};
-    const std::vector<CAddress> v6_addrs{GetAddresses(/*max_addresses=*/ 0, /*max_pct=*/ 0, Network::NET_IPV6, /*filtered=*/ false)};
+    const std::vector<CAddress> v4_addrs{GetAddressesUnsafe(/*max_addresses=*/0, /*max_pct=*/0, Network::NET_IPV4, /*filtered=*/false)};
+    const std::vector<CAddress> v6_addrs{GetAddressesUnsafe(/*max_addresses=*/0, /*max_pct=*/0, Network::NET_IPV6, /*filtered=*/false)};
     std::vector<CNetAddr> clearnet_addrs;
     clearnet_addrs.reserve(v4_addrs.size() + v6_addrs.size());
     std::transform(v4_addrs.begin(), v4_addrs.end(), std::back_inserter(clearnet_addrs),
@@ -4008,6 +4005,11 @@ static void CaptureMessageToFile(const CAddress& addr,
     uint32_t size = data.size();
     ser_writedata32(f, size);
     f << data;
+
+    if (f.fclose() != 0) {
+        throw std::ios_base::failure(
+            strprintf("Error closing %s after write, file contents are likely incomplete", fs::PathToString(path)));
+    }
 }
 
 std::function<void(const CAddress& addr,
