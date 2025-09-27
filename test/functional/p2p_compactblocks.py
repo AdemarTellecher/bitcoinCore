@@ -54,6 +54,7 @@ from test_framework.script import (
     CScript,
     OP_DROP,
     OP_TRUE,
+    OP_RETURN,
 )
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
@@ -557,6 +558,42 @@ class CompactBlocksTest(BitcoinTestFramework):
         test_node.send_and_ping(msg_block(block))
         assert_equal(node.getbestblockhash(), block.hash_hex)
 
+    # Multiple blocktxn responses will cause a node to get disconnected.
+    def test_multiple_blocktxn_response(self, test_node):
+        node = self.nodes[0]
+        utxo = self.utxos[0]
+
+        block = self.build_block_with_transactions(node, utxo, 2)
+
+        # Send compact block
+        comp_block = HeaderAndShortIDs()
+        comp_block.initialize_from_block(block, prefill_list=[0], use_witness=True)
+        test_node.send_and_ping(msg_cmpctblock(comp_block.to_p2p()))
+        absolute_indexes = []
+        with p2p_lock:
+            assert "getblocktxn" in test_node.last_message
+            absolute_indexes = test_node.last_message["getblocktxn"].block_txn_request.to_absolute()
+        assert_equal(absolute_indexes, [1, 2])
+
+        # Send a blocktxn that does not succeed in reconstruction, triggering
+        # getdata fallback.
+        msg = msg_blocktxn()
+        msg.block_transactions = BlockTransactions(block.hash_int, [block.vtx[2]] + [block.vtx[1]])
+        test_node.send_and_ping(msg)
+
+        # Tip should not have updated
+        assert_equal(int(node.getbestblockhash(), 16), block.hashPrevBlock)
+
+        # We should receive a getdata request
+        test_node.wait_for_getdata([block.hash_int], timeout=10)
+        assert test_node.last_message["getdata"].inv[0].type == MSG_BLOCK or \
+               test_node.last_message["getdata"].inv[0].type == MSG_BLOCK | MSG_WITNESS_FLAG
+
+        # Send the same blocktxn and assert the sender gets disconnected.
+        with node.assert_debug_log(['previous compact block reconstruction attempt failed']):
+            test_node.send_without_ping(msg)
+        test_node.wait_for_disconnect()
+
     def test_getblocktxn_handler(self, test_node):
         node = self.nodes[0]
         # bitcoind will not send blocktxn responses for blocks whose height is
@@ -709,7 +746,6 @@ class CompactBlocksTest(BitcoinTestFramework):
         utxo = self.utxos[0]
 
         block = self.build_block_with_transactions(node, utxo, 5)
-        del block.vtx[3]
         block.hashMerkleRoot = block.calc_merkle_root()
         # Drop the coinbase witness but include the witness commitment.
         add_witness_commitment(block)
@@ -726,6 +762,37 @@ class CompactBlocksTest(BitcoinTestFramework):
         # Check that the tip didn't advance
         assert_not_equal(node.getbestblockhash(), block.hash_hex)
         test_node.sync_with_ping()
+
+        # Re-establish a proper witness commitment with the coinbase witness, but
+        # invalidate the last tx in the block.
+        block.vtx[4].vin[0].scriptSig = CScript([OP_RETURN])
+        block.hashMerkleRoot = block.calc_merkle_root()
+        add_witness_commitment(block)
+        block.solve()
+
+        # This will lead to a consensus failure for which we also won't be disconnected but which
+        # will be cached.
+        comp_block.initialize_from_block(block, prefill_list=list(range(len(block.vtx))), use_witness=True)
+        msg = msg_cmpctblock(comp_block.to_p2p())
+        test_node.send_and_ping(msg)
+
+        # The tip still didn't advance.
+        assert_not_equal(node.getbestblockhash(), block.hash_hex)
+        test_node.sync_with_ping()
+
+        # The failure above was cached. Submitting the compact block again will return a cached
+        # consensus error (the code path is different) and still not get us disconnected (nor
+        # advance the tip).
+        test_node.send_and_ping(msg)
+        assert_not_equal(node.getbestblockhash(), block.hash_hex)
+        test_node.sync_with_ping()
+
+        # Now, announcing a second block building on top of the invalid one will get us disconnected.
+        block.hashPrevBlock = block.hash_int
+        block.solve()
+        comp_block.initialize_from_block(block, prefill_list=list(range(len(block.vtx))), use_witness=True)
+        msg = msg_cmpctblock(comp_block.to_p2p())
+        test_node.send_await_disconnect(msg)
 
     # Helper for enabling cb announcements
     # Send the sendcmpct request and sync headers
@@ -942,6 +1009,15 @@ class CompactBlocksTest(BitcoinTestFramework):
 
         self.log.info("Testing handling of invalid compact blocks...")
         self.test_invalid_tx_in_compactblock(self.segwit_node)
+
+        # The previous test will lead to a disconnection. Reconnect before continuing.
+        self.segwit_node = self.nodes[0].add_p2p_connection(TestP2PConn())
+
+        self.log.info("Testing handling of multiple blocktxn responses...")
+        self.test_multiple_blocktxn_response(self.segwit_node)
+
+        # The previous test will lead to a disconnection. Reconnect before continuing.
+        self.segwit_node = self.nodes[0].add_p2p_connection(TestP2PConn())
 
         self.log.info("Testing invalid index in cmpctblock message...")
         self.test_invalid_cmpctblock_message()

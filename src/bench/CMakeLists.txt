@@ -12,6 +12,7 @@ add_executable(bench_bitcoin
   bech32.cpp
   bip324_ecdh.cpp
   block_assemble.cpp
+  blockencodings.cpp
   ccoins_caching.cpp
   chacha20.cpp
   checkblock.cpp
@@ -85,4 +86,4 @@ add_test(NAME bench_sanity_check
   COMMAND bench_bitcoin -sanity-check
 )
 
-install_binary_component(bench_bitcoin)
+install_binary_component(bench_bitcoin INTERNAL)

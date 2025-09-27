@@ -303,7 +303,7 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 
     AssertLockHeld(cs_main);
     AssertLockHeld(m_mempool->cs);
-    std::vector<uint256> vHashUpdate;
+    std::vector<Txid> vHashUpdate;
     {
         // disconnectpool is ordered so that the front is the most recently-confirmed
         // transaction (the last tx of the block at the tip) in the disconnected chain.
@@ -469,10 +469,8 @@ public:
         const bool m_allow_replacement;
         /** When true, allow sibling eviction. This only occurs in single transaction package settings. */
         const bool m_allow_sibling_eviction;
-        /** When true, the mempool will not be trimmed when any transactions are submitted in
-         * Finalize(). Instead, limits should be enforced at the end to ensure the package is not
-         * partially submitted.
-         */
+        /** Used to skip the LimitMempoolSize() call within AcceptSingleTransaction(). This should be used when multiple
+         * AcceptSubPackage calls are expected and the mempool will be trimmed at the end of AcceptPackage(). */
         const bool m_package_submission;
         /** When true, use package feerates instead of individual transaction feerates for fee-based
          * policies such as mempool min fee and min relay fee.
@@ -522,7 +520,7 @@ public:
             };
         }
 
-        /** Parameters for child-with-unconfirmed-parents package validation. */
+        /** Parameters for child-with-parents package validation. */
         static ATMPArgs PackageChildWithParents(const CChainParams& chainparams, int64_t accept_time,
                                                 std::vector<COutPoint>& coins_to_uncache, const std::optional<CFeeRate>& client_maxfeerate) {
             return ATMPArgs{/* m_chainparams */ chainparams,
@@ -548,7 +546,7 @@ public:
                             /* m_test_accept */ package_args.m_test_accept,
                             /* m_allow_replacement */ true,
                             /* m_allow_sibling_eviction */ true,
-                            /* m_package_submission */ true, // do not LimitMempoolSize in Finalize()
+                            /* m_package_submission */ true, // trim at the end of AcceptPackage()
                             /* m_package_feerates */ false, // only 1 transaction
                             /* m_client_maxfeerate */ package_args.m_client_maxfeerate,
                             /* m_allow_carveouts */ false,
@@ -725,8 +723,27 @@ private:
 
 private:
     CTxMemPool& m_pool;
+
+    /** Holds a cached view of available coins from the UTXO set, mempool, and artificial temporary coins (to enable package validation).
+     * The view doesn't track whether a coin previously existed but has now been spent. We detect conflicts in other ways:
+     * - conflicts within a transaction are checked in CheckTransaction (bad-txns-inputs-duplicate)
+     * - conflicts within a package are checked in IsWellFormedPackage (conflict-in-package)
+     * - conflicts with an existing mempool transaction are found in CTxMemPool::GetConflictTx and replacements are allowed
+     * The temporary coins should persist between individual transaction checks so that package validation is possible,
+     * but must be cleaned up when we finish validating a subpackage, whether accepted or rejected. The cache must also
+     * be cleared when mempool contents change (when a changeset is applied or when the mempool trims itself) because it
+     * can return cached coins that no longer exist in the backend. Use CleanupTemporaryCoins() anytime you are finished
+     * with a SubPackageState or call LimitMempoolSize().
+     */
     CCoinsViewCache m_view;
+
+    // These are the two possible backends for m_view.
+    /** When m_view is connected to m_viewmempool as its backend, it can pull coins from the mempool and from the UTXO
+     * set. This is also where temporary coins are stored. */
     CCoinsViewMemPool m_viewmempool;
+    /** When m_view is connected to m_dummy, it can no longer look up coins from the mempool or UTXO set (meaning no disk
+     * operations happen), but can still return coins it accessed previously. Useful for keeping track of which coins
+     * were pulled from disk. */
     CCoinsView m_dummy;
 
     Chainstate& m_active_chainstate;
@@ -1071,7 +1088,7 @@ bool MemPoolAccept::ReplacementChecks(Workspace& ws)
     AssertLockHeld(m_pool.cs);
 
     const CTransaction& tx = *ws.m_ptx;
-    const uint256& hash = ws.m_hash;
+    const Txid& hash = ws.m_hash;
     TxValidationState& state = ws.m_state;
 
     CFeeRate newFeeRate(ws.m_modified_fees, ws.m_vsize);
@@ -1237,13 +1254,8 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
     // Check input scripts and signatures.
     // This is done last to help prevent CPU exhaustion denial-of-service attacks.
     if (!CheckInputScripts(tx, state, m_view, scriptVerifyFlags, true, false, ws.m_precomputed_txdata, GetValidationCache())) {
-        // SCRIPT_VERIFY_CLEANSTACK requires SCRIPT_VERIFY_WITNESS, so we
-        // need to turn both off, and compare against just turning off CLEANSTACK
-        // to see if the failure is specifically due to witness validation.
-        TxValidationState state_dummy; // Want reported failures to be from first CheckInputScripts
-        if (!tx.HasWitness() && CheckInputScripts(tx, state_dummy, m_view, scriptVerifyFlags & ~(SCRIPT_VERIFY_WITNESS | SCRIPT_VERIFY_CLEANSTACK), true, false, ws.m_precomputed_txdata, GetValidationCache()) &&
-                !CheckInputScripts(tx, state_dummy, m_view, scriptVerifyFlags & ~SCRIPT_VERIFY_CLEANSTACK, true, false, ws.m_precomputed_txdata, GetValidationCache())) {
-            // Only the witness is missing, so the transaction itself may be fine.
+        // Detect a failure due to a missing witness so that p2p code can handle rejection caching appropriately.
+        if (!tx.HasWitness() && SpendsNonAnchorWitnessProg(tx, m_view)) {
             state.Invalid(TxValidationResult::TX_WITNESS_STRIPPED,
                     state.GetRejectReason(), state.GetDebugMessage());
         }
@@ -1258,7 +1270,7 @@ bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
     AssertLockHeld(cs_main);
     AssertLockHeld(m_pool.cs);
     const CTransaction& tx = *ws.m_ptx;
-    const uint256& hash = ws.m_hash;
+    const Txid& hash = ws.m_hash;
     TxValidationState& state = ws.m_state;
 
     // Check again against the current block tip's script verification
@@ -1305,7 +1317,7 @@ void MemPoolAccept::FinalizeSubpackage(const ATMPArgs& args)
         const bool replaced_with_tx{m_subpackage.m_changeset->GetTxCount() == 1};
         if (replaced_with_tx) {
             const CTransaction& tx = m_subpackage.m_changeset->GetAddedTxn(0);
-            tx_or_package_hash = tx.GetHash();
+            tx_or_package_hash = tx.GetHash().ToUint256();
             log_string += strprintf("New tx %s (wtxid=%s, fees=%s, vsize=%s)",
                                     tx.GetHash().ToString(),
                                     tx.GetWitnessHash().ToString(),
@@ -1394,7 +1406,7 @@ bool MemPoolAccept::SubmitPackage(const ATMPArgs& args, std::vector<Workspace>& 
         auto iter = m_pool.GetIter(ws.m_ptx->GetHash());
         Assume(iter.has_value());
         const auto effective_feerate = args.m_package_feerates ? ws.m_package_feerate :
-            CFeeRate{ws.m_modified_fees, static_cast<uint32_t>(ws.m_vsize)};
+            CFeeRate{ws.m_modified_fees, static_cast<int32_t>(ws.m_vsize)};
         const auto effective_feerate_wtxids = args.m_package_feerates ? all_package_wtxids :
             std::vector<Wtxid>{ws.m_ptx->GetWitnessHash()};
         results.emplace(ws.m_ptx->GetWitnessHash(),
@@ -1458,7 +1470,7 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
 
     if (!ConsensusScriptChecks(args, ws)) return MempoolAcceptResult::Failure(ws.m_state);
 
-    const CFeeRate effective_feerate{ws.m_modified_fees, static_cast<uint32_t>(ws.m_vsize)};
+    const CFeeRate effective_feerate{ws.m_modified_fees, static_cast<int32_t>(ws.m_vsize)};
     // Tx was accepted, but not added
     if (args.m_test_accept) {
         return MempoolAcceptResult::Success(std::move(m_subpackage.m_replaced_transactions), ws.m_vsize,
@@ -1470,6 +1482,10 @@ MempoolAcceptResult MemPoolAccept::AcceptSingleTransaction(const CTransactionRef
     // Limit the mempool, if appropriate.
     if (!args.m_package_submission && !args.m_bypass_limits) {
         LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip());
+        // If mempool contents change, then the m_view cache is dirty. Given this isn't a package
+        // submission, we won't be using the cache anymore, but clear it anyway for clarity.
+        CleanupTemporaryCoins();
+
         if (!m_pool.exists(ws.m_hash)) {
             // The tx no longer meets our (new) mempool minimum feerate but could be reconsidered in a package.
             ws.m_state.Invalid(TxValidationResult::TX_RECONSIDERABLE, "mempool full");
@@ -1610,7 +1626,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactions(const std::
         }
         if (args.m_test_accept) {
             const auto effective_feerate = args.m_package_feerates ? ws.m_package_feerate :
-                CFeeRate{ws.m_modified_fees, static_cast<uint32_t>(ws.m_vsize)};
+                CFeeRate{ws.m_modified_fees, static_cast<int32_t>(ws.m_vsize)};
             const auto effective_feerate_wtxids = args.m_package_feerates ? all_package_wtxids :
                 std::vector<Wtxid>{ws.m_ptx->GetWitnessHash()};
             results.emplace(ws.m_ptx->GetWitnessHash(),
@@ -1647,7 +1663,8 @@ void MemPoolAccept::CleanupTemporaryCoins()
     // (3) Confirmed coins don't need to be removed. The chainstate has not changed (we are
     // holding cs_main and no blocks have been processed) so the confirmed tx cannot disappear like
     // a mempool tx can. The coin may now be spent after we submitted a tx to mempool, but
-    // we have already checked that the package does not have 2 transactions spending the same coin.
+    // we have already checked that the package does not have 2 transactions spending the same coin
+    // and we check whether a mempool transaction spends conflicting coins (CTxMemPool::GetConflictTx).
     // Keeping them in m_view is an optimization to not re-fetch confirmed coins if we later look up
     // inputs for this transaction again.
     for (const auto& outpoint : m_viewmempool.GetNonBaseCoins()) {
@@ -1694,7 +1711,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
 
     // There are two topologies we are able to handle through this function:
     // (1) A single transaction
-    // (2) A child-with-unconfirmed-parents package.
+    // (2) A child-with-parents package.
     // Check that the package is well-formed. If it isn't, we won't try to validate any of the
     // transactions and thus won't return any MempoolAcceptResults, just a package-wide error.
 
@@ -1703,49 +1720,11 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
         return PackageMempoolAcceptResult(package_state_quit_early, {});
     }
 
-    if (package.size() > 1) {
+    if (package.size() > 1 && !IsChildWithParents(package)) {
         // All transactions in the package must be a parent of the last transaction. This is just an
         // opportunity for us to fail fast on a context-free check without taking the mempool lock.
-        if (!IsChildWithParents(package)) {
-            package_state_quit_early.Invalid(PackageValidationResult::PCKG_POLICY, "package-not-child-with-parents");
-            return PackageMempoolAcceptResult(package_state_quit_early, {});
-        }
-
-        // IsChildWithParents() guarantees the package is > 1 transactions.
-        assert(package.size() > 1);
-        // The package must be 1 child with all of its unconfirmed parents. The package is expected to
-        // be sorted, so the last transaction is the child.
-        const auto& child = package.back();
-        std::unordered_set<uint256, SaltedTxidHasher> unconfirmed_parent_txids;
-        std::transform(package.cbegin(), package.cend() - 1,
-                       std::inserter(unconfirmed_parent_txids, unconfirmed_parent_txids.end()),
-                       [](const auto& tx) { return tx->GetHash(); });
-
-        // All child inputs must refer to a preceding package transaction or a confirmed UTXO. The only
-        // way to verify this is to look up the child's inputs in our current coins view (not including
-        // mempool), and enforce that all parents not present in the package be available at chain tip.
-        // Since this check can bring new coins into the coins cache, keep track of these coins and
-        // uncache them if we don't end up submitting this package to the mempool.
-        const CCoinsViewCache& coins_tip_cache = m_active_chainstate.CoinsTip();
-        for (const auto& input : child->vin) {
-            if (!coins_tip_cache.HaveCoinInCache(input.prevout)) {
-                args.m_coins_to_uncache.push_back(input.prevout);
-            }
-        }
-        // Using the MemPoolAccept m_view cache allows us to look up these same coins faster later.
-        // This should be connecting directly to CoinsTip, not to m_viewmempool, because we specifically
-        // require inputs to be confirmed if they aren't in the package.
-        m_view.SetBackend(m_active_chainstate.CoinsTip());
-        const auto package_or_confirmed = [this, &unconfirmed_parent_txids](const auto& input) {
-             return unconfirmed_parent_txids.count(input.prevout.hash) > 0 || m_view.HaveCoin(input.prevout);
-        };
-        if (!std::all_of(child->vin.cbegin(), child->vin.cend(), package_or_confirmed)) {
-            package_state_quit_early.Invalid(PackageValidationResult::PCKG_POLICY, "package-not-child-with-unconfirmed-parents");
-            return PackageMempoolAcceptResult(package_state_quit_early, {});
-        }
-        // Protect against bugs where we pull more inputs from disk that miss being added to
-        // coins_to_uncache. The backend will be connected again when needed in PreChecks.
-        m_view.SetBackend(m_dummy);
+        package_state_quit_early.Invalid(PackageValidationResult::PCKG_POLICY, "package-not-child-with-parents");
+        return PackageMempoolAcceptResult(package_state_quit_early, {});
     }
 
     LOCK(m_pool.cs);
@@ -1831,6 +1810,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
 
     // Make sure we haven't exceeded max mempool size.
     // Package transactions that were submitted to mempool or already in mempool may be evicted.
+    // If mempool contents change, then the m_view cache is dirty. It has already been cleared above.
     LimitMempoolSize(m_pool, m_active_chainstate.CoinsTip());
 
     for (const auto& tx : package) {
@@ -2211,34 +2191,17 @@ bool CheckInputScripts(const CTransaction& tx, TxValidationState& state,
         if (pvChecks) {
             pvChecks->emplace_back(std::move(check));
         } else if (auto result = check(); result.has_value()) {
+            // Tx failures never trigger disconnections/bans.
+            // This is so that network splits aren't triggered
+            // either due to non-consensus relay policies (such as
+            // non-standard DER encodings or non-null dummy
+            // arguments) or due to new consensus rules introduced in
+            // soft forks.
             if (flags & STANDARD_NOT_MANDATORY_VERIFY_FLAGS) {
-                // Check whether the failure was caused by a
-                // non-mandatory script verification check, such as
-                // non-standard DER encodings or non-null dummy
-                // arguments; if so, ensure we return NOT_STANDARD
-                // instead of CONSENSUS to avoid downstream users
-                // splitting the network between upgraded and
-                // non-upgraded nodes by banning CONSENSUS-failing
-                // data providers.
-                CScriptCheck check2(txdata.m_spent_outputs[i], tx, validation_cache.m_signature_cache, i,
-                        flags & ~STANDARD_NOT_MANDATORY_VERIFY_FLAGS, cacheSigStore, &txdata);
-                auto mandatory_result = check2();
-                if (!mandatory_result.has_value()) {
-                    return state.Invalid(TxValidationResult::TX_NOT_STANDARD, strprintf("non-mandatory-script-verify-flag (%s)", ScriptErrorString(result->first)), result->second);
-                } else {
-                    // If the second check failed, it failed due to a mandatory script verification
-                    // flag, but the first check might have failed on a non-mandatory script
-                    // verification flag.
-                    //
-                    // Avoid reporting a mandatory script check failure with a non-mandatory error
-                    // string by reporting the error from the second check.
-                    result = mandatory_result;
-                }
+                return state.Invalid(TxValidationResult::TX_NOT_STANDARD, strprintf("mempool-script-verify-flag-failed (%s)", ScriptErrorString(result->first)), result->second);
+            } else {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS, strprintf("block-script-verify-flag-failed (%s)", ScriptErrorString(result->first)), result->second);
             }
-
-            // MANDATORY flag failures correspond to
-            // TxValidationResult::TX_CONSENSUS.
-            return state.Invalid(TxValidationResult::TX_CONSENSUS, strprintf("mandatory-script-verify-flag-failed (%s)", ScriptErrorString(result->first)), result->second);
         }
     }
 
@@ -2600,6 +2563,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
              Ticks<SecondsDouble>(m_chainman.time_forks),
              Ticks<MillisecondsDouble>(m_chainman.time_forks) / m_chainman.num_blocks_total);
 
+    if (fScriptChecks != m_prev_script_checks_logged && GetRole() == ChainstateRole::NORMAL) {
+        LogInfo("%s signature validations at block #%d (%s).", fScriptChecks ? "Enabling" : "Disabling", pindex->nHeight, block_hash.ToString());
+        m_prev_script_checks_logged = fScriptChecks;
+    }
+
     CBlockUndo blockundo;
 
     // Precomputed transaction data pointers must not be invalidated
@@ -2711,7 +2679,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     if (control) {
         auto parallel_result = control->Complete();
         if (parallel_result.has_value() && state.IsValid()) {
-            state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, strprintf("mandatory-script-verify-flag-failed (%s)", ScriptErrorString(parallel_result->first)), parallel_result->second);
+            state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, strprintf("block-script-verify-flag-failed (%s)", ScriptErrorString(parallel_result->first)), parallel_result->second);
         }
     }
     if (!state.IsValid()) {
@@ -2786,15 +2754,10 @@ CoinsCacheSizeState Chainstate::GetCoinsCacheSizeState(
     int64_t nTotalSpace =
         max_coins_cache_size_bytes + std::max<int64_t>(int64_t(max_mempool_size_bytes) - nMempoolUsage, 0);
 
-    //! No need to periodic flush if at least this much space still available.
-    static constexpr int64_t MAX_BLOCK_COINSDB_USAGE_BYTES = 10 * 1024 * 1024;  // 10MB
-    int64_t large_threshold =
-        std::max((9 * nTotalSpace) / 10, nTotalSpace - MAX_BLOCK_COINSDB_USAGE_BYTES);
-
     if (cacheSize > nTotalSpace) {
         LogPrintf("Cache size (%s) exceeds total space (%s)\n", cacheSize, nTotalSpace);
         return CoinsCacheSizeState::CRITICAL;
-    } else if (cacheSize > large_threshold) {
+    } else if (cacheSize > LargeCoinsCacheThreshold(nTotalSpace)) {
         return CoinsCacheSizeState::LARGE;
     }
     return CoinsCacheSizeState::OK;
@@ -2939,7 +2902,7 @@ bool Chainstate::FlushStateToDisk(
     }
     if (full_flush_completed && m_chainman.m_options.signals) {
         // Update best block in wallet (so we can detect restored wallets).
-        m_chainman.m_options.signals->ChainStateFlushed(this->GetRole(), m_chain.GetLocator());
+        m_chainman.m_options.signals->ChainStateFlushed(this->GetRole(), GetLocator(m_chain.Tip()));
     }
     } catch (const std::runtime_error& e) {
         return FatalError(m_chainman.GetNotifications(), state, strprintf(_("System error while flushing: %s"), e.what()));
@@ -3140,12 +3103,17 @@ public:
 };
 
 /**
- * Connect a new block to m_chain. pblock is either nullptr or a pointer to a CBlock
+ * Connect a new block to m_chain. block_to_connect is either nullptr or a pointer to a CBlock
  * corresponding to pindexNew, to bypass loading it again from disk.
  *
  * The block is added to connectTrace if connection succeeds.
  */
-bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew, const std::shared_ptr<const CBlock>& pblock, ConnectTrace& connectTrace, DisconnectedBlockTransactions& disconnectpool)
+bool Chainstate::ConnectTip(
+    BlockValidationState& state,
+    CBlockIndex* pindexNew,
+    std::shared_ptr<const CBlock> block_to_connect,
+    ConnectTrace& connectTrace,
+    DisconnectedBlockTransactions& disconnectpool)
 {
     AssertLockHeld(cs_main);
     if (m_mempool) AssertLockHeld(m_mempool->cs);
@@ -3153,18 +3121,15 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
     assert(pindexNew->pprev == m_chain.Tip());
     // Read block from disk.
     const auto time_1{SteadyClock::now()};
-    std::shared_ptr<const CBlock> pthisBlock;
-    if (!pblock) {
+    if (!block_to_connect) {
         std::shared_ptr<CBlock> pblockNew = std::make_shared<CBlock>();
         if (!m_blockman.ReadBlock(*pblockNew, *pindexNew)) {
             return FatalError(m_chainman.GetNotifications(), state, _("Failed to read block."));
         }
-        pthisBlock = pblockNew;
+        block_to_connect = std::move(pblockNew);
     } else {
         LogDebug(BCLog::BENCH, "  - Using cached block\n");
-        pthisBlock = pblock;
     }
-    const CBlock& blockConnecting = *pthisBlock;
     // Apply the block atomically to the chain state.
     const auto time_2{SteadyClock::now()};
     SteadyClock::time_point time_3;
@@ -3174,9 +3139,9 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
              Ticks<MillisecondsDouble>(time_2 - time_1));
     {
         CCoinsViewCache view(&CoinsTip());
-        bool rv = ConnectBlock(blockConnecting, state, pindexNew, view);
+        bool rv = ConnectBlock(*block_to_connect, state, pindexNew, view);
         if (m_chainman.m_options.signals) {
-            m_chainman.m_options.signals->BlockChecked(blockConnecting, state);
+            m_chainman.m_options.signals->BlockChecked(block_to_connect, state);
         }
         if (!rv) {
             if (state.IsInvalid())
@@ -3212,8 +3177,8 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
              Ticks<MillisecondsDouble>(m_chainman.time_chainstate) / m_chainman.num_blocks_total);
     // Remove conflicting transactions from the mempool.;
     if (m_mempool) {
-        m_mempool->removeForBlock(blockConnecting.vtx, pindexNew->nHeight);
-        disconnectpool.removeForBlock(blockConnecting.vtx);
+        m_mempool->removeForBlock(block_to_connect->vtx, pindexNew->nHeight);
+        disconnectpool.removeForBlock(block_to_connect->vtx);
     }
     // Update m_chain & related variables.
     m_chain.SetTip(*pindexNew);
@@ -3239,7 +3204,7 @@ bool Chainstate::ConnectTip(BlockValidationState& state, CBlockIndex* pindexNew,
         m_chainman.MaybeCompleteSnapshotValidation();
     }
 
-    connectTrace.BlockConnected(pindexNew, std::move(pthisBlock));
+    connectTrace.BlockConnected(pindexNew, std::move(block_to_connect));
     return true;
 }
 
@@ -4552,7 +4517,7 @@ bool ChainstateManager::ProcessNewBlock(const std::shared_ptr<const CBlock>& blo
         }
         if (!ret) {
             if (m_options.signals) {
-                m_options.signals->BlockChecked(*block, state);
+                m_options.signals->BlockChecked(block, state);
             }
             LogError("%s: AcceptBlock FAILED (%s)\n", __func__, state.ToString());
             return false;

@@ -85,7 +85,7 @@ static RPCHelpMan ping()
     return RPCHelpMan{
         "ping",
         "Requests that a ping be sent to all other nodes, to measure ping time.\n"
-                "Results provided in getpeerinfo, pingtime and pingwait fields are decimal seconds.\n"
+                "Results are provided in getpeerinfo.\n"
                 "Ping command is handled in queue with all other commands, so it measures processing backlog, not just network ping.\n",
                 {},
                 RPCResult{RPCResult::Type::NONE, "", ""},
@@ -142,6 +142,8 @@ static RPCHelpMan getpeerinfo()
                         {RPCResult::Type::STR, "SERVICE_NAME", "the service name if it is recognised"}
                     }},
                     {RPCResult::Type::BOOL, "relaytxes", "Whether we relay transactions to this peer"},
+                    {RPCResult::Type::NUM, "last_inv_sequence", "Mempool sequence number of this peer's last INV"},
+                    {RPCResult::Type::NUM, "inv_to_send", "How many txs we have queued to announce to this peer"},
                     {RPCResult::Type::NUM_TIME, "lastsend", "The " + UNIX_EPOCH_TIME + " of the last send"},
                     {RPCResult::Type::NUM_TIME, "lastrecv", "The " + UNIX_EPOCH_TIME + " of the last receive"},
                     {RPCResult::Type::NUM_TIME, "last_transaction", "The " + UNIX_EPOCH_TIME + " of the last valid transaction received from this peer"},
@@ -150,9 +152,9 @@ static RPCHelpMan getpeerinfo()
                     {RPCResult::Type::NUM, "bytesrecv", "The total bytes received"},
                     {RPCResult::Type::NUM_TIME, "conntime", "The " + UNIX_EPOCH_TIME + " of the connection"},
                     {RPCResult::Type::NUM, "timeoffset", "The time offset in seconds"},
-                    {RPCResult::Type::NUM, "pingtime", /*optional=*/true, "The last ping time in milliseconds (ms), if any"},
-                    {RPCResult::Type::NUM, "minping", /*optional=*/true, "The minimum observed ping time in milliseconds (ms), if any"},
-                    {RPCResult::Type::NUM, "pingwait", /*optional=*/true, "The duration in milliseconds (ms) of an outstanding ping (if non-zero)"},
+                    {RPCResult::Type::NUM, "pingtime", /*optional=*/true, "The last ping time in seconds, if any"},
+                    {RPCResult::Type::NUM, "minping", /*optional=*/true, "The minimum observed ping time in seconds, if any"},
+                    {RPCResult::Type::NUM, "pingwait", /*optional=*/true, "The duration in seconds of an outstanding ping (if non-zero)"},
                     {RPCResult::Type::NUM, "version", "The peer version, such as 70001"},
                     {RPCResult::Type::STR, "subver", "The string version"},
                     {RPCResult::Type::BOOL, "inbound", "Inbound (true) or Outbound (false)"},
@@ -238,6 +240,8 @@ static RPCHelpMan getpeerinfo()
         obj.pushKV("services", strprintf("%016x", services));
         obj.pushKV("servicesnames", GetServicesNames(services));
         obj.pushKV("relaytxes", statestats.m_relay_txs);
+        obj.pushKV("last_inv_sequence", statestats.m_last_inv_seq);
+        obj.pushKV("inv_to_send", statestats.m_inv_to_send);
         obj.pushKV("lastsend", count_seconds(stats.m_last_send));
         obj.pushKV("lastrecv", count_seconds(stats.m_last_recv));
         obj.pushKV("last_transaction", count_seconds(stats.m_last_tx_time));
@@ -1000,26 +1004,28 @@ static RPCHelpMan addpeeraddress()
 
     UniValue obj(UniValue::VOBJ);
     std::optional<CNetAddr> net_addr{LookupHost(addr_string, false)};
+    if (!net_addr.has_value()) {
+        throw JSONRPCError(RPC_CLIENT_INVALID_IP_OR_SUBNET, "Invalid IP address");
+    }
+
     bool success{false};
 
-    if (net_addr.has_value()) {
-        CService service{net_addr.value(), port};
-        CAddress address{MaybeFlipIPv6toCJDNS(service), ServiceFlags{NODE_NETWORK | NODE_WITNESS}};
-        address.nTime = Now<NodeSeconds>();
-        // The source address is set equal to the address. This is equivalent to the peer
-        // announcing itself.
-        if (addrman.Add({address}, address)) {
-            success = true;
-            if (tried) {
-                // Attempt to move the address to the tried addresses table.
-                if (!addrman.Good(address)) {
-                    success = false;
-                    obj.pushKV("error", "failed-adding-to-tried");
-                }
+    CService service{net_addr.value(), port};
+    CAddress address{MaybeFlipIPv6toCJDNS(service), ServiceFlags{NODE_NETWORK | NODE_WITNESS}};
+    address.nTime = Now<NodeSeconds>();
+    // The source address is set equal to the address. This is equivalent to the peer
+    // announcing itself.
+    if (addrman.Add({address}, address)) {
+        success = true;
+        if (tried) {
+            // Attempt to move the address to the tried addresses table.
+            if (!addrman.Good(address)) {
+                success = false;
+                obj.pushKV("error", "failed-adding-to-tried");
             }
-        } else {
-            obj.pushKV("error", "failed-adding-to-new");
         }
+    } else {
+        obj.pushKV("error", "failed-adding-to-new");
     }
 
     obj.pushKV("success", success);

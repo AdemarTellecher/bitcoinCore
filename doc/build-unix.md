@@ -9,6 +9,10 @@ To Build
 
 ```bash
 cmake -B build
+```
+Run `cmake -B build -LH` to see the full list of available options.
+
+```bash
 cmake --build build    # Append "-j N" for N parallel jobs
 cmake --install build  # Optional
 ```
@@ -50,11 +54,17 @@ Now, you can either build from self-compiled [depends](#dependencies) or install
 
     sudo apt-get install libevent-dev libboost-dev
 
-SQLite is required for the descriptor wallet:
+SQLite is required for the wallet:
 
     sudo apt install libsqlite3-dev
 
-To build Bitcoin Core without wallet, see [*Disable-wallet mode*](#disable-wallet-mode)
+To build Bitcoin Core without the wallet, see [*Disable-wallet mode*](#disable-wallet-mode)
+
+Cap'n Proto is needed for IPC functionality (see [multiprocess.md](multiprocess.md)):
+
+    sudo apt-get install libcapnp-dev capnproto
+
+Compile with `-DENABLE_IPC=OFF` if you do not need IPC functionality.
 
 ZMQ-enabled binaries are compiled with `-DWITH_ZMQ=ON` and require the following dependency:
 
@@ -63,11 +73,6 @@ ZMQ-enabled binaries are compiled with `-DWITH_ZMQ=ON` and require the following
 User-Space, Statically Defined Tracing (USDT) dependencies:
 
     sudo apt install systemtap-sdt-dev
-
-IPC-enabled binaries are compiled  with `-DENABLE_IPC=ON` and require the following dependencies.
-Skip if you do not need IPC functionality.
-
-    sudo apt-get install libcapnp-dev capnproto
 
 GUI dependencies:
 
@@ -101,11 +106,11 @@ Now, you can either build from self-compiled [depends](#dependencies) or install
 
     sudo dnf install libevent-devel boost-devel
 
-SQLite is required for the descriptor wallet:
+SQLite is required for the wallet:
 
     sudo dnf install sqlite-devel
 
-To build Bitcoin Core without wallet, see [*Disable-wallet mode*](#disable-wallet-mode)
+To build Bitcoin Core without the wallet, see [*Disable-wallet mode*](#disable-wallet-mode)
 
 ZMQ-enabled binaries are compiled with `-DWITH_ZMQ=ON` and require the following dependency:
 
@@ -115,10 +120,11 @@ User-Space, Statically Defined Tracing (USDT) dependencies:
 
     sudo dnf install systemtap-sdt-devel
 
-IPC-enabled binaries are compiled with `-DENABLE_IPC=ON` and require the following dependency.
-Skip if you do not need IPC functionality.
+Cap'n Proto is needed for IPC functionality (see [multiprocess.md](multiprocess.md)):
 
-    sudo dnf install capnproto
+    sudo dnf install capnproto capnproto-devel
+
+Compile with `-DENABLE_IPC=OFF` if you do not need IPC functionality.
 
 GUI dependencies:
 
@@ -139,6 +145,51 @@ The GUI will be able to encode addresses in QR codes unless this feature is expl
 
 Otherwise, if you don't need QR encoding support, use the `-DWITH_QRENCODE=OFF` option to disable this feature in order to compile the GUI.
 
+### Alpine
+
+#### Dependency Build Instructions
+
+Build requirements:
+
+    apk add build-base cmake linux-headers pkgconf python3
+
+Now, you can either build from self-compiled [depends](#dependencies) or install the required dependencies:
+
+    apk add libevent-dev boost-dev
+
+SQLite is required for the wallet:
+
+    apk add sqlite-dev
+
+To build Bitcoin Core without the wallet, see [*Disable-wallet mode*](#disable-wallet-mode)
+
+Cap'n Proto is needed for IPC functionality (see [multiprocess.md](multiprocess.md)):
+
+    apk add capnproto capnproto-dev
+
+Compile with `-DENABLE_IPC=OFF` if you do not need IPC functionality.
+
+ZMQ dependencies (provides ZMQ API):
+
+    apk add zeromq-dev
+
+User-Space, Statically Defined Tracing (USDT) is not supported or tested on Alpine Linux at this time.
+
+GUI dependencies:
+
+Bitcoin Core includes a GUI built with the cross-platform Qt Framework. To compile the GUI, we need to install
+the necessary parts of Qt, the libqrencode and pass `-DBUILD_GUI=ON`. Skip if you don't intend to use the GUI.
+
+    apk add qt6-qtbase-dev  qt6-qttools-dev
+
+For Qt 6.5 and later, the `xcb-util-cursor` package must be installed at runtime.
+
+The GUI will be able to encode addresses in QR codes unless this feature is explicitly disabled. To install libqrencode, run:
+
+    apk add libqrencode-dev
+
+Otherwise, if you don't need QR encoding support, use the `-DWITH_QRENCODE=OFF` option to disable this feature in order to compile the GUI.
+
 ## Dependencies
 
 See [dependencies.md](dependencies.md) for a complete overview, and
@@ -156,18 +207,11 @@ In this case there is no dependency on SQLite.
 
 Mining is also possible in disable-wallet mode using the `getblocktemplate` RPC call.
 
-Additional Configure Flags
---------------------------
-A list of additional configure flags can be displayed with:
-
-    cmake -B build -LH
-
-
 Setup and Build Example: Arch Linux
 -----------------------------------
 This example lists the steps necessary to setup and build a command line only distribution of the latest changes on Arch Linux:
 
-    pacman --sync --needed cmake boost gcc git libevent make python sqlite
+    pacman --sync --needed capnproto cmake boost gcc git libevent make python sqlite
     git clone https://github.com/bitcoin/bitcoin.git
     cd bitcoin/
     cmake -B build
