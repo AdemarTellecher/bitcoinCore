@@ -248,7 +248,7 @@ def check_MACHO_libraries(binary) -> bool:
     return ok
 
 def check_MACHO_min_os(binary) -> bool:
-    if binary.build_version.minos == [13,0,0]:
+    if binary.build_version.minos == [14,0,0]:
         return True
     return False
 
@@ -258,7 +258,7 @@ def check_MACHO_sdk(binary) -> bool:
     return False
 
 def check_MACHO_lld(binary) -> bool:
-    if binary.build_version.tools[0].version == [18, 1, 8]:
+    if binary.build_version.tools[0].version == [19, 1, 4]:
         return True
     return False
 
