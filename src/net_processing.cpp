@@ -22,7 +22,7 @@
 #include <flatfile.h>
 #include <headerssync.h>
 #include <index/blockfilterindex.h>
-#include <kernel/chain.h>
+#include <kernel/types.h>
 #include <logging.h>
 #include <merkleblock.h>
 #include <net.h>
@@ -85,6 +85,7 @@
 #include <typeinfo>
 #include <utility>
 
+using kernel::ChainstateRole;
 using namespace util::hex_literals;
 
 TRACEPOINT_SEMAPHORE(net, inbound_message);
@@ -507,7 +508,7 @@ public:
     /** Overridden from CValidationInterface. */
     void ActiveTipChange(const CBlockIndex& new_tip, bool) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
-    void BlockConnected(ChainstateRole role, const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexConnected) override
+    void BlockConnected(const ChainstateRole& role, const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexConnected) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     void BlockDisconnected(const std::shared_ptr<const CBlock> &block, const CBlockIndex* pindex) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
@@ -1387,7 +1388,7 @@ void PeerManagerImpl::FindNextBlocksToDownload(const Peer& peer, unsigned int co
     // When we sync with AssumeUtxo and discover the snapshot is not in the peer's best chain, abort:
     // We can't reorg to this chain due to missing undo data until the background sync has finished,
     // so downloading blocks from it would be futile.
-    const CBlockIndex* snap_base{m_chainman.GetSnapshotBaseBlock()};
+    const CBlockIndex* snap_base{m_chainman.CurrentChainstate().SnapshotBase()};
     if (snap_base && state->pindexBestKnownBlock->GetAncestor(snap_base->nHeight) != snap_base) {
         LogDebug(BCLog::NET, "Not downloading blocks from peer=%d, which doesn't have the snapshot block in its best chain.\n", peer.m_id);
         return;
@@ -1946,7 +1947,7 @@ void PeerManagerImpl::ActiveTipChange(const CBlockIndex& new_tip, bool is_ibd)
  * possibly reduce dynamic block stalling timeout.
  */
 void PeerManagerImpl::BlockConnected(
-    ChainstateRole role,
+    const ChainstateRole& role,
     const std::shared_ptr<const CBlock>& pblock,
     const CBlockIndex* pindex)
 {
@@ -1965,8 +1966,8 @@ void PeerManagerImpl::BlockConnected(
     }
 
     // The following task can be skipped since we don't maintain a mempool for
-    // the ibd/background chainstate.
-    if (role == ChainstateRole::BACKGROUND) {
+    // the historical chainstate.
+    if (role.historical) {
         return;
     }
     LOCK(m_tx_download_mutex);
@@ -2276,8 +2277,9 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
     } else if (inv.IsMsgWitnessBlk()) {
         // Fast-path: in this case it is possible to serve the block directly from disk,
         // as the network format matches the format on disk
-        std::vector<std::byte> block_data;
-        if (!m_chainman.m_blockman.ReadRawBlock(block_data, block_pos)) {
+        if (const auto block_data{m_chainman.m_blockman.ReadRawBlock(block_pos)}) {
+            MakeAndPushMessage(pfrom, NetMsgType::BLOCK, std::span{*block_data});
+        } else {
             if (WITH_LOCK(m_chainman.GetMutex(), return m_chainman.m_blockman.IsBlockPruned(*pindex))) {
                 LogDebug(BCLog::NET, "Block was pruned before it could be read, %s\n", pfrom.DisconnectMsg(fLogIPs));
             } else {
@@ -2286,7 +2288,6 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
             pfrom.fDisconnect = true;
             return;
         }
-        MakeAndPushMessage(pfrom, NetMsgType::BLOCK, std::span{block_data});
         // Don't set pblock as we've sent the block
     } else {
         // Send block from disk
@@ -2955,6 +2956,13 @@ void PeerManagerImpl::ProcessHeadersMessage(CNode& pfrom, Peer& peer,
                                                            state, &pindexLast)};
     if (!processed) {
         if (state.IsInvalid()) {
+            if (!pfrom.IsInboundConn() && state.GetResult() == BlockValidationResult::BLOCK_CACHED_INVALID) {
+                // Warn user if outgoing peers send us headers of blocks that we previously marked as invalid.
+                LogWarning("%s (received from peer=%i). "
+                           "If this happens with all peers, consider database corruption (that -reindex may fix) "
+                           "or a potential consensus incompatibility.",
+                           state.GetDebugMessage(), pfrom.GetId());
+            }
             MaybePunishNodeForBlock(pfrom.GetId(), state, via_compact_block, "invalid header received");
             return;
         }
@@ -3659,16 +3667,22 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             return;
         }
 
+        auto new_peer_msg = [&]() {
+            const auto mapped_as{m_connman.GetMappedAS(pfrom.addr)};
+            return strprintf("New %s peer connected: transport: %s, version: %d, blocks=%d peer=%d%s%s\n",
+                pfrom.ConnectionTypeAsString(),
+                TransportTypeAsString(pfrom.m_transport->GetInfo().transport_type),
+                pfrom.nVersion.load(), peer->m_starting_height,
+                pfrom.GetId(), pfrom.LogIP(fLogIPs),
+                (mapped_as ? strprintf(", mapped_as=%d", mapped_as) : ""));
+        };
+
         // Log successful connections unconditionally for outbound, but not for inbound as those
         // can be triggered by an attacker at high rate.
-        if (!pfrom.IsInboundConn() || LogAcceptCategory(BCLog::NET, BCLog::Level::Debug)) {
-            const auto mapped_as{m_connman.GetMappedAS(pfrom.addr)};
-            LogInfo("New %s %s peer connected: version: %d, blocks=%d, peer=%d%s%s\n",
-                      pfrom.ConnectionTypeAsString(),
-                      TransportTypeAsString(pfrom.m_transport->GetInfo().transport_type),
-                      pfrom.nVersion.load(), peer->m_starting_height,
-                      pfrom.GetId(), pfrom.LogIP(fLogIPs),
-                      (mapped_as ? strprintf(", mapped_as=%d", mapped_as) : ""));
+        if (pfrom.IsInboundConn()) {
+            LogDebug(BCLog::NET, "%s", new_peer_msg());
+        } else {
+            LogInfo("%s", new_peer_msg());
         }
 
         if (pfrom.GetCommonVersion() >= SHORT_IDS_BLOCKS_VERSION) {
@@ -5908,18 +5922,19 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 return std::max(0, MAX_BLOCKS_IN_TRANSIT_PER_PEER - static_cast<int>(state.vBlocksInFlight.size()));
             };
 
-            // If a snapshot chainstate is in use, we want to find its next blocks
-            // before the background chainstate to prioritize getting to network tip.
+            // If there are multiple chainstates, download blocks for the
+            // current chainstate first, to prioritize getting to network tip
+            // before downloading historical blocks.
             FindNextBlocksToDownload(*peer, get_inflight_budget(), vToDownload, staller);
-            if (m_chainman.BackgroundSyncInProgress() && !IsLimitedPeer(*peer)) {
-                // If the background tip is not an ancestor of the snapshot block,
+            auto historical_blocks{m_chainman.GetHistoricalBlockRange()};
+            if (historical_blocks && !IsLimitedPeer(*peer)) {
+                // If the first needed historical block is not an ancestor of the last,
                 // we need to start requesting blocks from their last common ancestor.
-                const CBlockIndex *from_tip = LastCommonAncestor(m_chainman.GetBackgroundSyncTip(), m_chainman.GetSnapshotBaseBlock());
+                const CBlockIndex* from_tip = LastCommonAncestor(historical_blocks->first, historical_blocks->second);
                 TryDownloadingHistoricalBlocks(
                     *peer,
                     get_inflight_budget(),
-                    vToDownload, from_tip,
-                    Assert(m_chainman.GetSnapshotBaseBlock()));
+                    vToDownload, from_tip, historical_blocks->second);
             }
             for (const CBlockIndex *pindex : vToDownload) {
                 uint32_t nFetchFlags = GetFetchFlags(*peer);
