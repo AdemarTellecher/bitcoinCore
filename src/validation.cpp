@@ -943,18 +943,6 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
         return state.Invalid(TxValidationResult::TX_NOT_STANDARD, "bad-txns-too-many-sigops",
                 strprintf("%d", nSigOpsCost));
 
-    // No individual transactions are allowed below the min relay feerate except from disconnected blocks.
-    // This requirement, unlike CheckFeeRate, cannot be bypassed using m_package_feerates because,
-    // while a tx could be package CPFP'd when entering the mempool, we do not have a DoS-resistant
-    // method of ensuring the tx remains bumped. For example, the fee-bumping child could disappear
-    // due to a replacement.
-    // The only exception is TRUC transactions.
-    if (!bypass_limits && ws.m_ptx->version != TRUC_VERSION && ws.m_modified_fees < m_pool.m_opts.min_relay_feerate.GetFee(ws.m_vsize)) {
-        // Even though this is a fee-related failure, this result is TX_MEMPOOL_POLICY, not
-        // TX_RECONSIDERABLE, because it cannot be bypassed using package validation.
-        return state.Invalid(TxValidationResult::TX_MEMPOOL_POLICY, "min relay fee not met",
-                             strprintf("%d < %d", ws.m_modified_fees, m_pool.m_opts.min_relay_feerate.GetFee(ws.m_vsize)));
-    }
     // No individual transactions are allowed below the mempool min feerate except from disconnected
     // blocks and transactions in a package. Package transactions will be checked using package
     // feerate later.
@@ -1452,7 +1440,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptMultipleTransactionsInternal(con
 
     // These context-free package limits can be done before taking the mempool lock.
     PackageValidationState package_state;
-    if (!IsWellFormedPackage(txns, package_state, /*require_sorted=*/true)) return PackageMempoolAcceptResult(package_state, {});
+    if (!IsWellFormedPackage(txns, package_state)) return PackageMempoolAcceptResult(package_state, {});
 
     std::vector<Workspace> workspaces{};
     workspaces.reserve(txns.size());
@@ -1649,7 +1637,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
     // transactions and thus won't return any MempoolAcceptResults, just a package-wide error.
 
     // Context-free package checks.
-    if (!IsWellFormedPackage(package, package_state_quit_early, /*require_sorted=*/true)) {
+    if (!IsWellFormedPackage(package, package_state_quit_early)) {
         return PackageMempoolAcceptResult(package_state_quit_early, {});
     }
 
@@ -1748,9 +1736,9 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
 
     for (const auto& tx : package) {
         const auto& wtxid = tx->GetWitnessHash();
-        if (multi_submission_result.m_tx_results.count(wtxid) > 0) {
+        if (multi_submission_result.m_tx_results.contains(wtxid)) {
             // We shouldn't have re-submitted if the tx result was already in results_final.
-            Assume(results_final.count(wtxid) == 0);
+            Assume(!results_final.contains(wtxid));
             // If it was submitted, check to see if the tx is still in the mempool. It could have
             // been evicted due to LimitMempoolSize() above.
             const auto& txresult = multi_submission_result.m_tx_results.at(wtxid);
@@ -1766,7 +1754,7 @@ PackageMempoolAcceptResult MemPoolAccept::AcceptPackage(const Package& package, 
             // Already-in-mempool transaction. Check to see if it's still there, as it could have
             // been evicted when LimitMempoolSize() was called.
             Assume(it->second.m_result_type != MempoolAcceptResult::ResultType::INVALID);
-            Assume(individual_results_nonfinal.count(wtxid) == 0);
+            Assume(!individual_results_nonfinal.contains(wtxid));
             // Query by txid to include the same-txid-different-witness ones.
             if (!m_pool.exists(tx->GetHash())) {
                 package_state_final.Invalid(PackageValidationResult::PCKG_TX, "transaction failed");
@@ -2857,9 +2845,7 @@ bool Chainstate::FlushStateToDisk(
                 }
                 // Flush the chainstate (which may refer to block index entries).
                 const auto empty_cache{(mode == FlushStateMode::ALWAYS) || fCacheLarge || fCacheCritical};
-                if (empty_cache ? !CoinsTip().Flush() : !CoinsTip().Sync()) {
-                    return FatalError(m_chainman.GetNotifications(), state, _("Failed to write to coin database."));
-                }
+                empty_cache ? CoinsTip().Flush() : CoinsTip().Sync();
                 full_flush_completed = true;
                 TRACEPOINT(utxocache, flush,
                     int64_t{Ticks<std::chrono::microseconds>(NodeClock::now() - nNow)},
@@ -2996,8 +2982,7 @@ bool Chainstate::DisconnectTip(BlockValidationState& state, DisconnectedBlockTra
             LogError("DisconnectTip(): DisconnectBlock %s failed\n", pindexDelete->GetBlockHash().ToString());
             return false;
         }
-        bool flushed = view.Flush(/*will_reuse_cache=*/false); // local CCoinsViewCache goes out of scope
-        assert(flushed);
+        view.Flush(/*will_reuse_cache=*/false); // local CCoinsViewCache goes out of scope
     }
     LogDebug(BCLog::BENCH, "- Disconnect block: %.2fms\n",
              Ticks<MillisecondsDouble>(SteadyClock::now() - time_start));
@@ -3131,8 +3116,7 @@ bool Chainstate::ConnectTip(
                  Ticks<MillisecondsDouble>(time_3 - time_2),
                  Ticks<SecondsDouble>(m_chainman.time_connect_total),
                  Ticks<MillisecondsDouble>(m_chainman.time_connect_total) / m_chainman.num_blocks_total);
-        bool flushed = view.Flush(/*will_reuse_cache=*/false); // local CCoinsViewCache goes out of scope
-        assert(flushed);
+        view.Flush(/*will_reuse_cache=*/false); // local CCoinsViewCache goes out of scope
     }
     const auto time_4{SteadyClock::now()};
     m_chainman.time_flush += time_4 - time_3;
@@ -4874,14 +4858,14 @@ bool Chainstate::ReplayBlocks()
     const CBlockIndex* pindexNew;            // New tip during the interrupted flush.
     const CBlockIndex* pindexFork = nullptr; // Latest block common to both the old and the new tip.
 
-    if (m_blockman.m_block_index.count(hashHeads[0]) == 0) {
+    if (!m_blockman.m_block_index.contains(hashHeads[0])) {
         LogError("ReplayBlocks(): reorganization to unknown block requested\n");
         return false;
     }
     pindexNew = &(m_blockman.m_block_index[hashHeads[0]]);
 
     if (!hashHeads[1].IsNull()) { // The old tip is allowed to be 0, indicating it's the first flush.
-        if (m_blockman.m_block_index.count(hashHeads[1]) == 0) {
+        if (!m_blockman.m_block_index.contains(hashHeads[1])) {
             LogError("ReplayBlocks(): reorganization from unknown block requested\n");
             return false;
         }
@@ -5013,7 +4997,7 @@ bool Chainstate::LoadGenesisBlock()
     // m_blockman.m_block_index. Note that we can't use m_chain here, since it is
     // set based on the coins db, not the block index db, which is the only
     // thing loaded at this point.
-    if (m_blockman.m_block_index.count(params.GenesisBlock().GetHash()))
+    if (m_blockman.m_block_index.contains(params.GenesisBlock().GetHash()))
         return true;
 
     try {

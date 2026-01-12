@@ -66,7 +66,7 @@ jobs:
       - name: Determine fetch depth
         run: echo "FETCH_DEPTH=$((${{ github.event.pull_request.commits }} + 2))" >> "$GITHUB_ENV"
       - *ANNOTATION_PR_NUMBER
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: ${{ env.FETCH_DEPTH }}
@@ -148,7 +148,7 @@ jobs:
 
       - &CHECKOUT
         name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           # Ensure the latest merged pull request state is used, even on re-runs.
           ref: &CHECKOUT_REF_TMPL ${{ github.event_name == 'pull_request' && github.ref || '' }}
@@ -320,6 +320,7 @@ jobs:
           BITCOIN_BIN: '${{ github.workspace }}\build\bin\Release\bitcoin.exe'
           BITCOIND: '${{ github.workspace }}\build\bin\Release\bitcoind.exe'
           BITCOINCLI: '${{ github.workspace }}\build\bin\Release\bitcoin-cli.exe'
+          BITCOIN_BENCH: '${{ github.workspace }}\build\bin\Release\bench_bitcoin.exe'
           BITCOINTX: '${{ github.workspace }}\build\bin\Release\bitcoin-tx.exe'
           BITCOINUTIL: '${{ github.workspace }}\build\bin\Release\bitcoin-util.exe'
           BITCOINWALLET: '${{ github.workspace }}\build\bin\Release\bitcoin-wallet.exe'
@@ -383,7 +384,7 @@ jobs:
       - *ANNOTATION_PR_NUMBER
 
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: ${{ needs.record-frozen-commit.outputs.commit }}
 
@@ -439,7 +440,7 @@ jobs:
       - *ANNOTATION_PR_NUMBER
 
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: ${{ needs.record-frozen-commit.outputs.commit }}
 
@@ -483,9 +484,6 @@ jobs:
           ./src/univalue/object.exe
           ./src/univalue/unitester.exe
 
-      - name: Run benchmarks
-        run: ./bin/bench_bitcoin.exe -sanity-check
-
       - name: Adjust paths in test/config.ini
         shell: pwsh
         run: |
@@ -522,6 +520,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: 'iwyu'
+            cirrus-runner: 'ghcr.io/cirruslabs/ubuntu-runner-amd64:24.04-md'
+            fallback-runner: 'ubuntu-24.04'
+            timeout-minutes: 120
+            file-env: './ci/test/00_setup_env_native_iwyu.sh'
+
           - name: '32 bit ARM'
             cirrus-runner: 'ubuntu-24.04-arm' # Cirrus' Arm runners are Apple (with virtual Linux aarch64), which doesn't support 32-bit mode
             fallback-runner: 'ubuntu-24.04-arm'
@@ -657,7 +661,7 @@ jobs:
       - *ANNOTATION_PR_NUMBER
 
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: *CHECKOUT_REF_TMPL
           fetch-depth: 0

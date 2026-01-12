@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2020-2022 The Bitcoin Core developers
+# Copyright (c) 2020-present The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test the send RPC command."""
@@ -159,7 +159,7 @@ class WalletSendTest(BitcoinTestFramework):
             assert "txid" in res
         else:
             assert_equal(res["complete"], False)
-            assert not "txid" in res
+            assert "txid" not in res
             assert "psbt" in res
 
         from_balance = from_wallet.getbalances()["mine"]["trusted"]

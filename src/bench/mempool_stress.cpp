@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2022 The Bitcoin Core developers
+// Copyright (c) 2011-present The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -140,7 +140,7 @@ static void ComplexMemPool(benchmark::Bench& bench)
 
         // Add all transactions to the mempool.
         // Also store the first 10 transactions from each cluster as the
-        // transactions we'll "mine" in the the benchmark.
+        // transactions we'll "mine" in the benchmark.
         int tx_count = 0;
         for (auto& tx : transactions) {
             if (tx_count < 10) {

@@ -1,5 +1,5 @@
 // Copyright (c) 2009-2010 Satoshi Nakamoto
-// Copyright (c) 2009-2022 The Bitcoin Core developers
+// Copyright (c) 2009-present The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -44,7 +44,7 @@ public:
     bool HaveCoin(const COutPoint &outpoint) const override;
     uint256 GetBestBlock() const override;
     std::vector<uint256> GetHeadBlocks() const override;
-    bool BatchWrite(CoinsViewCacheCursor& cursor, const uint256 &hashBlock) override;
+    void BatchWrite(CoinsViewCacheCursor& cursor, const uint256& hashBlock) override;
     std::unique_ptr<CCoinsViewCursor> Cursor() const override;
 
     //! Whether an unsupported database format is used.

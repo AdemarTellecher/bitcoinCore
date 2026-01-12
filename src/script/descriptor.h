@@ -1,4 +1,4 @@
-// Copyright (c) 2018-2021 The Bitcoin Core developers
+// Copyright (c) 2018-present The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -165,6 +165,9 @@ struct Descriptor {
      * @param[out] ext_pubs Any extended public keys
      */
     virtual void GetPubKeys(std::set<CPubKey>& pubkeys, std::set<CExtPubKey>& ext_pubs) const = 0;
+
+    /** Semantic/safety warnings (includes subdescriptors). */
+    virtual std::vector<std::string> Warnings() const = 0;
 };
 
 /** Parse a `descriptor` string. Included private keys are put in `out`.

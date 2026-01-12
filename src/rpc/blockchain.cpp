@@ -1084,10 +1084,10 @@ static RPCHelpMan gettxoutsetinfo()
     const std::optional<CCoinsStats> maybe_stats = GetUTXOStats(coins_view, *blockman, hash_type, node.rpc_interruption_point, pindex, index_requested);
     if (maybe_stats.has_value()) {
         const CCoinsStats& stats = maybe_stats.value();
-        ret.pushKV("height", (int64_t)stats.nHeight);
+        ret.pushKV("height", stats.nHeight);
         ret.pushKV("bestblock", stats.hashBlock.GetHex());
-        ret.pushKV("txouts", (int64_t)stats.nTransactionOutputs);
-        ret.pushKV("bogosize", (int64_t)stats.nBogoSize);
+        ret.pushKV("txouts", stats.nTransactionOutputs);
+        ret.pushKV("bogosize", stats.nBogoSize);
         if (hash_type == CoinStatsHashType::HASH_SERIALIZED) {
             ret.pushKV("hash_serialized_3", stats.hashSerialized.GetHex());
         }
@@ -1217,13 +1217,13 @@ static RPCHelpMan gettxout()
     if (coin->nHeight == MEMPOOL_HEIGHT) {
         ret.pushKV("confirmations", 0);
     } else {
-        ret.pushKV("confirmations", (int64_t)(pindex->nHeight - coin->nHeight + 1));
+        ret.pushKV("confirmations", pindex->nHeight - coin->nHeight + 1);
     }
     ret.pushKV("value", ValueFromAmount(coin->out.nValue));
     UniValue o(UniValue::VOBJ);
     ScriptToUniv(coin->out.scriptPubKey, /*out=*/o, /*include_hex=*/true, /*include_address=*/true);
     ret.pushKV("scriptPubKey", std::move(o));
-    ret.pushKV("coinbase", (bool)coin->fCoinBase);
+    ret.pushKV("coinbase", static_cast<bool>(coin->fCoinBase));
 
     return ret;
 },
@@ -1823,7 +1823,7 @@ static RPCHelpMan getchaintxstats()
     const int64_t nTimeDiff{pindex->GetMedianTimePast() - past_block.GetMedianTimePast()};
 
     UniValue ret(UniValue::VOBJ);
-    ret.pushKV("time", (int64_t)pindex->nTime);
+    ret.pushKV("time", pindex->nTime);
     if (pindex->m_chain_tx_count) {
         ret.pushKV("txcount", pindex->m_chain_tx_count);
     }
@@ -1896,7 +1896,7 @@ static inline bool SetHasKeys(const std::set<T>& set) {return false;}
 template<typename T, typename Tk, typename... Args>
 static inline bool SetHasKeys(const std::set<T>& set, const Tk& key, const Args&... args)
 {
-    return (set.count(key) != 0) || SetHasKeys(set, args...);
+    return (set.contains(key)) || SetHasKeys(set, args...);
 }
 
 // outpoint (needed for the utxo index) + nHeight + fCoinBase
@@ -1987,12 +1987,12 @@ static RPCHelpMan getblockstats()
     const CBlockUndo& blockUndo = GetUndoChecked(chainman.m_blockman, pindex);
 
     const bool do_all = stats.size() == 0; // Calculate everything if nothing selected (default)
-    const bool do_mediantxsize = do_all || stats.count("mediantxsize") != 0;
-    const bool do_medianfee = do_all || stats.count("medianfee") != 0;
-    const bool do_feerate_percentiles = do_all || stats.count("feerate_percentiles") != 0;
+    const bool do_mediantxsize = do_all || stats.contains("mediantxsize");
+    const bool do_medianfee = do_all || stats.contains("medianfee");
+    const bool do_feerate_percentiles = do_all || stats.contains("feerate_percentiles");
     const bool loop_inputs = do_all || do_medianfee || do_feerate_percentiles ||
         SetHasKeys(stats, "utxo_increase", "utxo_increase_actual", "utxo_size_inc", "utxo_size_inc_actual", "totalfee", "avgfee", "avgfeerate", "minfee", "maxfee", "minfeerate", "maxfeerate");
-    const bool loop_outputs = do_all || loop_inputs || stats.count("total_out");
+    const bool loop_outputs = do_all || loop_inputs || stats.contains("total_out");
     const bool do_calculate_size = do_mediantxsize ||
         SetHasKeys(stats, "total_size", "avgtxsize", "mintxsize", "maxtxsize", "swtotal_size");
     const bool do_calculate_weight = do_all || SetHasKeys(stats, "total_weight", "avgfeerate", "swtotal_weight", "avgfeerate", "feerate_percentiles", "minfeerate", "maxfeerate");
@@ -2119,7 +2119,7 @@ static RPCHelpMan getblockstats()
     ret_all.pushKV("avgtxsize", (block.vtx.size() > 1) ? total_size / (block.vtx.size() - 1) : 0);
     ret_all.pushKV("blockhash", pindex.GetBlockHash().GetHex());
     ret_all.pushKV("feerate_percentiles", std::move(feerates_res));
-    ret_all.pushKV("height", (int64_t)pindex.nHeight);
+    ret_all.pushKV("height", pindex.nHeight);
     ret_all.pushKV("ins", inputs);
     ret_all.pushKV("maxfee", maxfee);
     ret_all.pushKV("maxfeerate", maxfeerate);
@@ -2140,7 +2140,7 @@ static RPCHelpMan getblockstats()
     ret_all.pushKV("total_size", total_size);
     ret_all.pushKV("total_weight", total_weight);
     ret_all.pushKV("totalfee", totalfee);
-    ret_all.pushKV("txs", (int64_t)block.vtx.size());
+    ret_all.pushKV("txs", block.vtx.size());
     ret_all.pushKV("utxo_increase", outputs - inputs);
     ret_all.pushKV("utxo_size_inc", utxo_size_inc);
     ret_all.pushKV("utxo_increase_actual", utxos - inputs);
@@ -2185,7 +2185,7 @@ bool FindScriptPubKey(std::atomic<int>& scan_progress, const std::atomic<bool>& 
             uint32_t high = 0x100 * *UCharCast(key.hash.begin()) + *(UCharCast(key.hash.begin()) + 1);
             scan_progress = (int)(high * 100.0 / 65536.0 + 0.5);
         }
-        if (needles.count(coin.out.scriptPubKey)) {
+        if (needles.contains(coin.out.scriptPubKey)) {
             out_results.emplace(key, coin);
         }
         cursor->Next();
@@ -2460,7 +2460,7 @@ static bool CheckBlockFilterMatches(BlockManager& blockman, const CBlockIndex& b
     // Check if any of the outputs match the scriptPubKey
     for (const auto& tx : block.vtx) {
         if (std::any_of(tx->vout.cbegin(), tx->vout.cend(), [&](const auto& txout) {
-                return needles.count(std::vector<unsigned char>(txout.scriptPubKey.begin(), txout.scriptPubKey.end())) != 0;
+                return needles.contains(std::vector<unsigned char>(txout.scriptPubKey.begin(), txout.scriptPubKey.end()));
             })) {
             return true;
         }
@@ -2468,7 +2468,7 @@ static bool CheckBlockFilterMatches(BlockManager& blockman, const CBlockIndex& b
     // Check if any of the inputs match the scriptPubKey
     for (const auto& txundo : block_undo.vtxundo) {
         if (std::any_of(txundo.vprevout.cbegin(), txundo.vprevout.cend(), [&](const auto& coin) {
-                return needles.count(std::vector<unsigned char>(coin.out.scriptPubKey.begin(), coin.out.scriptPubKey.end())) != 0;
+                return needles.contains(std::vector<unsigned char>(coin.out.scriptPubKey.begin(), coin.out.scriptPubKey.end()));
             })) {
             return true;
         }
@@ -3437,7 +3437,7 @@ return RPCHelpMan{
         const CChain& chain = cs.m_chain;
         const CBlockIndex* tip = chain.Tip();
 
-        data.pushKV("blocks",                (int)chain.Height());
+        data.pushKV("blocks", chain.Height());
         data.pushKV("bestblockhash",         tip->GetBlockHash().GetHex());
         data.pushKV("bits", strprintf("%08x", tip->nBits));
         data.pushKV("target", GetTarget(*tip, chainman.GetConsensus().powLimit).GetHex());
