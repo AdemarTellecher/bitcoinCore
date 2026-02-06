@@ -230,7 +230,7 @@ static bool InitHTTPAllowList()
         if (!subnet.IsValid()) {
             uiInterface.ThreadSafeMessageBox(
                 Untranslated(strprintf("Invalid -rpcallowip subnet specification: %s. Valid values are a single IP (e.g. 1.2.3.4), a network/netmask (e.g. 1.2.3.4/255.255.255.0), a network/CIDR (e.g. 1.2.3.4/24), all ipv4 (0.0.0.0/0), or all ipv6 (::/0). RFC4193 is allowed only if -cjdnsreachable=0.", strAllow)),
-                "", CClientUIInterface::MSG_ERROR);
+                CClientUIInterface::MSG_ERROR);
             return false;
         }
         rpc_allow_subnets.push_back(subnet);
@@ -330,7 +330,7 @@ static void http_request_cb(struct evhttp_request* req, void* arg)
         std::unique_ptr<HTTPWorkItem> item(new HTTPWorkItem(std::move(hreq), path, i->handler));
         assert(g_work_queue);
         if (g_work_queue->Enqueue(item.get())) {
-            [[maybe_unused]] auto _{item.release()}; /* if true, queue took ownership */
+            (void)item.release(); /* if true, queue took ownership */
         } else {
             LogWarning("Request rejected because http work queue depth exceeded, it can be increased with the -rpcworkqueue= setting");
             item->req->WriteReply(HTTP_SERVICE_UNAVAILABLE, "Work queue depth exceeded");

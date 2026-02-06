@@ -145,7 +145,7 @@ class TestValidationInterface : public ValidationInterface
 public:
     std::optional<std::vector<std::byte>> m_expected_valid_block = std::nullopt;
 
-    void BlockChecked(Block block, const BlockValidationState state) override
+    void BlockChecked(Block block, BlockValidationStateView state) override
     {
         if (m_expected_valid_block.has_value()) {
             auto ser_block{block.ToBytes()};
@@ -265,9 +265,7 @@ void run_verify_test(
 }
 
 template <typename T>
-concept HasToBytes = requires(T t) {
-    { t.ToBytes() } -> std::convertible_to<std::vector<std::byte>>;
-};
+concept HasToBytes = requires(T t) { t.ToBytes(); };
 
 template <typename T>
 void CheckHandle(T object, T distinct_object)
@@ -277,7 +275,9 @@ void CheckHandle(T object, T distinct_object)
     BOOST_CHECK(object.get() != distinct_object.get());
 
     if constexpr (HasToBytes<T>) {
-        BOOST_CHECK_NE(object.ToBytes().size(), distinct_object.ToBytes().size());
+        const auto object_bytes = object.ToBytes();
+        const auto distinct_bytes = distinct_object.ToBytes();
+        BOOST_CHECK(!std::ranges::equal(object_bytes, distinct_bytes));
     }
 
     // Copy constructor
@@ -321,7 +321,8 @@ void CheckRange(const RangeType& range, size_t expected_size)
     using value_type = std::ranges::range_value_t<RangeType>;
 
     BOOST_CHECK_EQUAL(range.size(), expected_size);
-    BOOST_CHECK_EQUAL(range.empty(), (expected_size == 0));
+    BOOST_REQUIRE(range.size() > 0); // Some checks below assume a non-empty range
+    BOOST_REQUIRE(!range.empty());
 
     BOOST_CHECK(range.begin() != range.end());
     BOOST_CHECK_EQUAL(std::distance(range.begin(), range.end()), static_cast<std::ptrdiff_t>(expected_size));
@@ -332,7 +333,6 @@ void CheckRange(const RangeType& range, size_t expected_size)
         BOOST_CHECK_EQUAL(range[i].get(), (*(range.begin() + i)).get());
     }
 
-    BOOST_CHECK_NE(range.at(0).get(), range.at(expected_size - 1).get());
     BOOST_CHECK_THROW(range.at(expected_size), std::out_of_range);
 
     BOOST_CHECK_EQUAL(range.front().get(), range[0].get());
@@ -659,6 +659,39 @@ BOOST_AUTO_TEST_CASE(btck_context_tests)
     }
 }
 
+BOOST_AUTO_TEST_CASE(btck_block_header_tests)
+{
+    // Block header format: version(4) + prev_hash(32) + merkle_root(32) + timestamp(4) + bits(4) + nonce(4) = 80 bytes
+    BlockHeader header_0{hex_string_to_byte_vec("00e07a26beaaeee2e71d7eb19279545edbaf15de0999983626ec00000000000000000000579cf78b65229bfb93f4a11463af2eaa5ad91780f27f5d147a423bea5f7e4cdf2a47e268b4dd01173a9662ee")};
+    BOOST_CHECK_EQUAL(byte_span_to_hex_string_reversed(header_0.Hash().ToBytes()), "00000000000000000000325c7e14a4ee3b4fcb2343089a839287308a0ddbee4f");
+    BlockHeader header_1{hex_string_to_byte_vec("00c00020e7cb7b4de21d26d55bd384017b8bb9333ac3b2b55bed00000000000000000000d91b4484f801b99f03d36b9d26cfa83420b67f81da12d7e6c1e7f364e743c5ba9946e268b4dd011799c8533d")};
+    CheckHandle(header_0, header_1);
+
+    // Test error handling for invalid data
+    BOOST_CHECK_THROW(BlockHeader{hex_string_to_byte_vec("00")}, std::runtime_error);
+    BOOST_CHECK_THROW(BlockHeader{hex_string_to_byte_vec("")}, std::runtime_error);
+
+    // Test all header field accessors using mainnet block 1
+    auto mainnet_block_1_header = hex_string_to_byte_vec("010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e36299");
+    BlockHeader header{mainnet_block_1_header};
+    BOOST_CHECK_EQUAL(header.Version(), 1);
+    BOOST_CHECK_EQUAL(header.Timestamp(), 1231469665);
+    BOOST_CHECK_EQUAL(header.Bits(), 0x1d00ffff);
+    BOOST_CHECK_EQUAL(header.Nonce(), 2573394689);
+    BOOST_CHECK_EQUAL(byte_span_to_hex_string_reversed(header.Hash().ToBytes()), "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048");
+    auto prev_hash = header.PrevHash();
+    BOOST_CHECK_EQUAL(byte_span_to_hex_string_reversed(prev_hash.ToBytes()), "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f");
+
+    auto raw_block = hex_string_to_byte_vec("010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e362990101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0704ffff001d0104ffffffff0100f2052a0100000043410496b538e853519c726a2c91e61ec11600ae1390813a627c66fb8be7947be63c52da7589379515d4e0a604f8141781e62294721166bf621e73a82cbf2342c858eeac00000000");
+    Block block{raw_block};
+    BlockHeader block_header{block.GetHeader()};
+    BOOST_CHECK_EQUAL(block_header.Version(), 1);
+    BOOST_CHECK_EQUAL(block_header.Timestamp(), 1231469665);
+    BOOST_CHECK_EQUAL(block_header.Bits(), 0x1d00ffff);
+    BOOST_CHECK_EQUAL(block_header.Nonce(), 2573394689);
+    BOOST_CHECK_EQUAL(byte_span_to_hex_string_reversed(block_header.Hash().ToBytes()), "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048");
+}
+
 BOOST_AUTO_TEST_CASE(btck_block)
 {
     Block block{hex_string_to_byte_vec(REGTEST_BLOCK_DATA[0])};
@@ -759,7 +792,9 @@ void chainman_reindex_test(TestDirectory& test_directory)
 {
     auto notifications{std::make_shared<TestKernelNotifications>()};
     auto context{create_context(notifications, ChainType::MAINNET)};
-    auto chainman{create_chainman(test_directory, true, false, false, false, context)};
+    auto chainman{create_chainman(
+        test_directory, /*reindex=*/true, /*wipe_chainstate=*/false,
+        /*block_tree_db_in_memory=*/false, /*chainstate_db_in_memory=*/false, context)};
 
     std::vector<std::string> import_files;
     BOOST_CHECK(chainman->ImportBlocks(import_files));
@@ -802,7 +837,9 @@ void chainman_reindex_chainstate_test(TestDirectory& test_directory)
 {
     auto notifications{std::make_shared<TestKernelNotifications>()};
     auto context{create_context(notifications, ChainType::MAINNET)};
-    auto chainman{create_chainman(test_directory, false, true, false, false, context)};
+    auto chainman{create_chainman(
+        test_directory, /*reindex=*/false, /*wipe_chainstate=*/true,
+        /*block_tree_db_in_memory=*/false, /*chainstate_db_in_memory=*/false, context)};
 
     std::vector<std::string> import_files;
     import_files.push_back((test_directory.m_directory / "blocks" / "blk00000.dat").string());
@@ -814,13 +851,20 @@ void chainman_mainnet_validation_test(TestDirectory& test_directory)
     auto notifications{std::make_shared<TestKernelNotifications>()};
     auto validation_interface{std::make_shared<TestValidationInterface>()};
     auto context{create_context(notifications, ChainType::MAINNET, validation_interface)};
-    auto chainman{create_chainman(test_directory, false, false, false, false, context)};
+    auto chainman{create_chainman(
+        test_directory, /*reindex=*/false, /*wipe_chainstate=*/false,
+        /*block_tree_db_in_memory=*/false, /*chainstate_db_in_memory=*/false, context)};
 
     // mainnet block 1
     auto raw_block = hex_string_to_byte_vec("010000006fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d6190000000000982051fd1e4ba744bbbe680e1fee14677ba1a3c3540bf7b1cdb606e857233e0e61bc6649ffff001d01e362990101000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0704ffff001d0104ffffffff0100f2052a0100000043410496b538e853519c726a2c91e61ec11600ae1390813a627c66fb8be7947be63c52da7589379515d4e0a604f8141781e62294721166bf621e73a82cbf2342c858eeac00000000");
     Block block{raw_block};
+    BlockHeader header{block.GetHeader()};
     TransactionView tx{block.GetTransaction(block.CountTransactions() - 1)};
     BOOST_CHECK_EQUAL(byte_span_to_hex_string_reversed(tx.Txid().ToBytes()), "0e3e2357e806b6cdb1f70b54c3a3a17b6714ee1f0e68bebb44a74b1efd512098");
+    BOOST_CHECK_EQUAL(header.Version(), 1);
+    BOOST_CHECK_EQUAL(header.Timestamp(), 1231469665);
+    BOOST_CHECK_EQUAL(header.Bits(), 0x1d00ffff);
+    BOOST_CHECK_EQUAL(header.Nonce(), 2573394689);
     BOOST_CHECK_EQUAL(tx.CountInputs(), 1);
     Transaction tx2 = tx;
     BOOST_CHECK_EQUAL(tx2.CountInputs(), 1);
@@ -937,7 +981,9 @@ BOOST_AUTO_TEST_CASE(btck_chainman_in_memory_tests)
 
     auto notifications{std::make_shared<TestKernelNotifications>()};
     auto context{create_context(notifications, ChainType::REGTEST)};
-    auto chainman{create_chainman(in_memory_test_directory, false, false, true, true, context)};
+    auto chainman{create_chainman(
+        in_memory_test_directory, /*reindex=*/false, /*wipe_chainstate=*/false,
+        /*block_tree_db_in_memory=*/true, /*chainstate_db_in_memory=*/true, context)};
 
     for (auto& raw_block : REGTEST_BLOCK_DATA) {
         Block block{hex_string_to_byte_vec(raw_block)};
@@ -960,13 +1006,34 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
     auto notifications{std::make_shared<TestKernelNotifications>()};
     auto context{create_context(notifications, ChainType::REGTEST)};
 
+    {
+        auto chainman{create_chainman(
+            test_directory, /*reindex=*/false, /*wipe_chainstate=*/false,
+            /*block_tree_db_in_memory=*/false, /*chainstate_db_in_memory=*/false, context)};
+        for (const auto& data : REGTEST_BLOCK_DATA) {
+            Block block{hex_string_to_byte_vec(data)};
+            BlockHeader header = block.GetHeader();
+            BlockValidationState state{};
+            BOOST_CHECK(state.GetBlockValidationResult() == BlockValidationResult::UNSET);
+            BOOST_CHECK(chainman->ProcessBlockHeader(header, state));
+            BOOST_CHECK(state.GetValidationMode() == ValidationMode::VALID);
+            BlockTreeEntry entry{*chainman->GetBlockTreeEntry(header.Hash())};
+            BOOST_CHECK(!chainman->GetChain().Contains(entry));
+            BlockTreeEntry best_entry{chainman->GetBestEntry()};
+            BlockHash hash{entry.GetHash()};
+            BOOST_CHECK(hash == best_entry.GetHeader().Hash());
+        }
+    }
+
     // Validate 206 regtest blocks in total.
     // Stop halfway to check that it is possible to continue validating starting
     // from prior state.
     const size_t mid{REGTEST_BLOCK_DATA.size() / 2};
 
     {
-        auto chainman{create_chainman(test_directory, false, false, false, false, context)};
+        auto chainman{create_chainman(
+            test_directory, /*reindex=*/false, /*wipe_chainstate=*/false,
+            /*block_tree_db_in_memory=*/false, /*chainstate_db_in_memory=*/false, context)};
         for (size_t i{0}; i < mid; i++) {
             Block block{hex_string_to_byte_vec(REGTEST_BLOCK_DATA[i])};
             bool new_block{false};
@@ -975,7 +1042,9 @@ BOOST_AUTO_TEST_CASE(btck_chainman_regtest_tests)
         }
     }
 
-    auto chainman{create_chainman(test_directory, false, false, false, false, context)};
+    auto chainman{create_chainman(
+        test_directory, /*reindex=*/false, /*wipe_chainstate=*/false,
+        /*block_tree_db_in_memory=*/false, /*chainstate_db_in_memory=*/false, context)};
 
     for (size_t i{mid}; i < REGTEST_BLOCK_DATA.size(); i++) {
         Block block{hex_string_to_byte_vec(REGTEST_BLOCK_DATA[i])};

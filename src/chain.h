@@ -299,7 +299,15 @@ protected:
     CBlockIndex& operator=(CBlockIndex&&) = delete;
 };
 
-arith_uint256 GetBlockProof(const CBlockIndex& block);
+/** Compute how much work an nBits value corresponds to. */
+arith_uint256 GetBitsProof(uint32_t bits);
+
+/** Compute how much work a block index entry corresponds to. */
+inline arith_uint256 GetBlockProof(const CBlockIndex& block) { return GetBitsProof(block.nBits); }
+
+/** Compute how much work a block header corresponds to. */
+inline arith_uint256 GetBlockProof(const CBlockHeader& header) { return GetBitsProof(header.nBits); }
+
 /** Return the time it would take to redo the work difference between from and to, assuming the current hashrate corresponds to the difficulty at tip, in seconds. */
 int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& from, const CBlockIndex& tip, const Consensus::Params&);
 /** Find the forking point between two chain tips. */
@@ -418,6 +426,15 @@ public:
     int Height() const
     {
         return int(vChain.size()) - 1;
+    }
+
+    /** Check whether this chain's tip exists, has enough work, and is recent. */
+    bool IsTipRecent(const arith_uint256& min_chain_work, std::chrono::seconds max_tip_age) const EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+    {
+        const auto tip{Tip()};
+        return tip &&
+               tip->nChainWork >= min_chain_work &&
+               tip->Time() >= Now<NodeSeconds>() - max_tip_age;
     }
 
     /** Set/initialize a chain with a given tip. */

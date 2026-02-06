@@ -18,7 +18,6 @@ from test_framework.p2p import (
 from test_framework.messages import (
     CAddress,
     CInv,
-    COIN,
     MSG_WTX,
     malleate_tx_to_invalid_witness,
     msg_inv,
@@ -27,7 +26,7 @@ from test_framework.messages import (
 from test_framework.netutil import (
     format_addr_port
 )
-from test_framework.script_util import ValidWitnessMalleatedTx
+from test_framework.script_util import build_malleated_tx_package
 from test_framework.socks5 import (
     Socks5Configuration,
     Socks5Server,
@@ -36,7 +35,6 @@ from test_framework.test_framework import (
     BitcoinTestFramework,
 )
 from test_framework.util import (
-    MAX_NODES,
     assert_equal,
     assert_not_equal,
     assert_raises_rpc_error,
@@ -181,9 +179,6 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         self.socks5_server = Socks5Server(socks5_server_config)
         self.socks5_server.start()
 
-        # Tor ports are the highest among p2p/rpc/tor, so this should be the first available port.
-        ports_base = tor_port(MAX_NODES) + 1
-
         self.destinations = []
 
         self.destinations_lock = threading.Lock()
@@ -215,9 +210,12 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
                         actual_to_addr = addr
                         actual_to_port = port
 
+                    # Use port=0 to let the OS assign an available port. This
+                    # avoids "address already in use" errors when tests run
+                    # concurrently or ports are still in TIME_WAIT state.
                     self.network_thread.listen(
                         addr="127.0.0.1",
-                        port=ports_base + i,
+                        port=0,
                         p2p=listener,
                         callback=on_listen_done)
                     # Wait until the callback has been called.
@@ -400,16 +398,17 @@ class P2PPrivateBroadcast(BitcoinTestFramework):
         tx_originator.setmocktime(0) # Let the clock tick again (it will go backwards due to this).
 
         self.log.info("Sending a pair of transactions with the same txid but different valid wtxids via RPC")
-        txgen = ValidWitnessMalleatedTx()
-        funding = wallet.get_utxo()
-        fee_sat = 1000
-        siblings_parent = txgen.build_parent_tx(funding["txid"], amount=funding["value"] * COIN - fee_sat)
-        sibling1, sibling2 = txgen.build_malleated_children(siblings_parent.txid_hex, amount=siblings_parent.vout[0].nValue - fee_sat)
+        parent = wallet.create_self_transfer()["tx"]
+        parent_amount = parent.vout[0].nValue - 10000
+        child_amount = parent_amount - 10000
+        siblings_parent, sibling1, sibling2 = build_malleated_tx_package(
+            parent=parent,
+            rebalance_parent_output_amount=parent_amount,
+            child_amount=child_amount)
         self.log.info(f"  - sibling1: txid={sibling1.txid_hex}, wtxid={sibling1.wtxid_hex}")
         self.log.info(f"  - sibling2: txid={sibling2.txid_hex}, wtxid={sibling2.wtxid_hex}")
         assert_equal(sibling1.txid_hex, sibling2.txid_hex)
         assert_not_equal(sibling1.wtxid_hex, sibling2.wtxid_hex)
-        wallet.sign_tx(siblings_parent)
         assert_equal(len(tx_originator.getrawmempool()), 1)
         tx_returner.send_without_ping(msg_tx(siblings_parent))
         self.wait_until(lambda: len(tx_originator.getrawmempool()) > 1)

@@ -84,6 +84,7 @@ using interfaces::WalletLoader;
 using kernel::ChainstateRole;
 using node::BlockAssembler;
 using node::BlockWaitOptions;
+using node::CoinbaseTx;
 using util::Join;
 
 namespace node {
@@ -888,9 +889,14 @@ public:
         return m_block_template->vTxSigOpsCost;
     }
 
-    CTransactionRef getCoinbaseTx() override
+    CTransactionRef getCoinbaseRawTx() override
     {
         return m_block_template->block.vtx[0];
+    }
+
+    CoinbaseTx getCoinbaseTx() override
+    {
+        return m_block_template->m_coinbase_tx;
     }
 
     std::vector<unsigned char> getCoinbaseCommitment() override
@@ -974,7 +980,7 @@ public:
     bool checkBlock(const CBlock& block, const node::BlockCheckOptions& options, std::string& reason, std::string& debug) override
     {
         LOCK(chainman().GetMutex());
-        BlockValidationState state{TestBlockValidity(chainman().ActiveChainstate(), block, /*check_pow=*/options.check_pow, /*=check_merkle_root=*/options.check_merkle_root)};
+        BlockValidationState state{TestBlockValidity(chainman().ActiveChainstate(), block, /*check_pow=*/options.check_pow, /*check_merkle_root=*/options.check_merkle_root)};
         reason = state.GetRejectReason();
         debug = state.GetDebugMessage();
         return state.IsValid();

@@ -25,7 +25,6 @@ add_library(bitcoinkernel
   ../consensus/merkle.cpp
   ../consensus/tx_check.cpp
   ../consensus/tx_verify.cpp
-  ../core_read.cpp
   ../dbwrapper.cpp
   ../deploymentinfo.cpp
   ../deploymentstatus.cpp
@@ -72,8 +71,6 @@ add_library(bitcoinkernel
   ../util/rbf.cpp
   ../util/serfloat.cpp
   ../util/signalinterrupt.cpp
-  ../util/strencodings.cpp
-  ../util/string.cpp
   ../util/syserror.cpp
   ../util/threadnames.cpp
   ../util/time.cpp
@@ -92,7 +89,6 @@ target_link_libraries(bitcoinkernel
     secp256k1_objs
     $<$<PLATFORM_ID:Windows>:bcrypt>
     $<TARGET_NAME_IF_EXISTS:USDT::headers>
-  PUBLIC
     Boost::headers
 )
 

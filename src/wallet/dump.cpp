@@ -121,6 +121,11 @@ static void WalletToolReleaseWallet(CWallet* wallet)
 
 bool CreateFromDump(const ArgsManager& args, const std::string& name, const fs::path& wallet_path, bilingual_str& error, std::vector<bilingual_str>& warnings)
 {
+    if (name.empty()) {
+        tfm::format(std::cerr, "Wallet name cannot be empty\n");
+        return false;
+    }
+
     // Get the dumpfile
     std::string dump_filename = args.GetArg("-dumpfile", "");
     if (dump_filename.empty()) {
@@ -198,13 +203,6 @@ bool CreateFromDump(const ArgsManager& args, const std::string& name, const fs::
     bool ret = true;
     std::shared_ptr<CWallet> wallet(new CWallet(/*chain=*/nullptr, name, std::move(database)), WalletToolReleaseWallet);
     {
-        LOCK(wallet->cs_wallet);
-        DBErrors load_wallet_ret = wallet->LoadWallet();
-        if (load_wallet_ret != DBErrors::LOAD_OK) {
-            error = strprintf(_("Error creating %s"), name);
-            return false;
-        }
-
         // Get the database handle
         WalletDatabase& db = wallet->GetDatabase();
         std::unique_ptr<DatabaseBatch> batch = db.MakeBatch();
