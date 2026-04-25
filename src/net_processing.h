@@ -9,8 +9,9 @@
 #include <consensus/amount.h>
 #include <net.h>
 #include <node/txorphanage.h>
+#include <private_broadcast.h>
 #include <protocol.h>
-#include <threadsafety.h>
+#include <uint256.h>
 #include <util/expected.h>
 #include <validationinterface.h>
 
@@ -51,8 +52,7 @@ static const unsigned int MAX_HEADERS_RESULTS = 2000;
 struct CNodeStateStats {
     int nSyncHeight = -1;
     int nCommonHeight = -1;
-    int m_starting_height = -1;
-    std::chrono::microseconds m_ping_wait;
+    NodeClock::duration m_ping_wait;
     std::vector<int> vHeightInFlight;
     bool m_relay_txs;
     int m_inv_to_send = 0;
@@ -117,6 +117,21 @@ public:
 
     /** Get peer manager info. */
     virtual PeerManagerInfo GetInfo() const = 0;
+
+    /** Get info about transactions currently being privately broadcast. */
+    virtual std::vector<PrivateBroadcast::TxBroadcastInfo> GetPrivateBroadcastInfo() const = 0;
+
+    /**
+     * Abort private broadcast attempts for transactions currently being privately broadcast.
+     *
+     * @param[in] id A transaction identifier. It will be matched against both txid and wtxid for
+     *               all transactions in the private broadcast queue.
+     *
+     * @return Transactions removed from the private broadcast queue. If the provided id matches a
+     *         txid that corresponds to multiple transactions with different wtxids, multiple
+     *         transactions may be returned.
+     */
+    virtual std::vector<CTransactionRef> AbortPrivateBroadcast(const uint256& id) = 0;
 
     /**
      * Initiate a transaction broadcast to eligible peers.
