@@ -60,6 +60,9 @@ static RPCMethod sendrawtransaction()
         "dedicated, short-lived connections to Tor or I2P peers or IPv4/IPv6 peers\n"
         "via the Tor network. This conceals the transaction's origin. The transaction\n"
         "will only enter the local mempool when it is received back from the network.\n"
+        "The private broadcast queue is bounded: when it is full, this RPC fails and\n"
+        "the transaction is not scheduled, until an existing one completes or is\n"
+        "aborted. Use getprivatebroadcastinfo to inspect the queue and abortprivatebroadcast to abort.\n"
 
         "\nA specific exception, RPC_TRANSACTION_ALREADY_IN_UTXO_SET, may throw if the transaction cannot be added to the mempool.\n"
 
@@ -143,7 +146,8 @@ static RPCMethod getprivatebroadcastinfo()
 {
     return RPCMethod{
         "getprivatebroadcastinfo",
-        "Returns information about transactions that are currently being privately broadcast.\n",
+        "Returns information about transactions that are currently being privately broadcast.\n"
+        "This method is only available when running with -privatebroadcast enabled.\n",
         {},
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -176,6 +180,10 @@ static RPCMethod getprivatebroadcastinfo()
         {
             const NodeContext& node{EnsureAnyNodeContext(request.context)};
             const PeerManager& peerman{EnsurePeerman(node)};
+            if (!peerman.GetInfo().private_broadcast) {
+                throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Private broadcast is not enabled. Ensure you're running Bitcoin Core with -privatebroadcast=1.");
+            }
+
             const auto txs{peerman.GetPrivateBroadcastInfo()};
 
             UniValue transactions(UniValue::VARR);
@@ -211,7 +219,8 @@ static RPCMethod abortprivatebroadcast()
     return RPCMethod{
         "abortprivatebroadcast",
         "Abort private broadcast attempts for a transaction currently being privately broadcast.\n"
-        "The transaction will be removed from the private broadcast queue.\n",
+        "The transaction will be removed from the private broadcast queue.\n"
+        "This method is only available when running with -privatebroadcast enabled.\n",
         {
             {"id", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "A transaction identifier to abort. It will be matched against both txid and wtxid for all transactions in the private broadcast queue.\n"
                                                                 "If the provided id matches a txid that corresponds to multiple transactions with different wtxids, multiple transactions will be removed and returned."},
@@ -236,10 +245,14 @@ static RPCMethod abortprivatebroadcast()
         },
         [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
         {
-            const uint256 id{ParseHashV(self.Arg<UniValue>("id"), "id")};
 
             const NodeContext& node{EnsureAnyNodeContext(request.context)};
             PeerManager& peerman{EnsurePeerman(node)};
+            if (!peerman.GetInfo().private_broadcast) {
+                throw JSONRPCError(RPC_METHOD_NOT_FOUND, "Private broadcast is not enabled. Ensure you're running Bitcoin Core with -privatebroadcast=1.");
+            }
+
+            const uint256 id{ParseHashV(self.Arg<UniValue>("id"), "id")};
 
             const auto removed_txs{peerman.AbortPrivateBroadcast(id)};
             if (removed_txs.empty()) {

@@ -587,7 +587,7 @@ BOOST_AUTO_TEST_CASE(strprintf_numbers)
 
 BOOST_AUTO_TEST_CASE(util_mocktime)
 {
-    NodeClockContext clock_ctx{111s};
+    FakeNodeClock clock{111s};
     // Check that mock time does not change after a sleep
     for (const auto& num_sleep : {0ms, 1ms}) {
         UninterruptibleSleep(num_sleep);
@@ -883,8 +883,7 @@ BOOST_AUTO_TEST_CASE(test_ToIntegralHex)
     BOOST_CHECK_EQUAL(*n, 0);
     n = ToIntegral<uint64_t>("FfFfFfFfFfFfFfFf", 16);
     BOOST_CHECK_EQUAL(*n, 0xFfFfFfFfFfFfFfFfULL);
-    n = ToIntegral<int64_t>("-1", 16);
-    BOOST_CHECK_EQUAL(*n, -1);
+    BOOST_CHECK_EQUAL(*ToIntegral<int64_t>("-1", 16), -1);
     // Invalid values
     BOOST_CHECK(!ToIntegral<uint64_t>("", 16));
     BOOST_CHECK(!ToIntegral<uint64_t>("-1", 16));

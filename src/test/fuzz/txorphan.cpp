@@ -41,7 +41,7 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
     SeedRandomStateForTest(SeedRand::ZEROS);
     FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
     FastRandomContext orphanage_rng{ConsumeUInt256(fuzzed_data_provider)};
-    NodeClockContext clock_ctx{ConsumeTime(fuzzed_data_provider)};
+    FakeNodeClock clock{ConsumeTime(fuzzed_data_provider)};
 
     auto orphanage = node::MakeTxOrphanage();
     std::vector<COutPoint> outpoints; // Duplicates are tolerated
@@ -56,8 +56,7 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
 
     std::vector<CTransactionRef> tx_history;
 
-    LIMITED_WHILE(outpoints.size() < 200'000 && fuzzed_data_provider.ConsumeBool(), 1000)
-    {
+    LIMITED_WHILE (outpoints.size() < 200'000 && fuzzed_data_provider.ConsumeBool(), 1000) {
         // construct transaction
         const CTransactionRef tx = [&] {
             CMutableTransaction tx_mut;
@@ -104,8 +103,7 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
         }
 
         // trigger orphanage functions
-        LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 1000)
-        {
+        LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 1000) {
             NodeId peer_id = fuzzed_data_provider.ConsumeIntegral<NodeId>();
             const auto total_bytes_start{orphanage->TotalOrphanUsage()};
             const auto total_peer_bytes_start{orphanage->UsageByPeer(peer_id)};
@@ -197,9 +195,13 @@ FUZZ_TARGET(txorphan, .init = initialize_orphanage)
                 [&] {
                     // Make a block out of txs and then EraseForBlock
                     CBlock block;
+                    int64_t block_weight{0};
                     int num_txs = fuzzed_data_provider.ConsumeIntegralInRange<unsigned int>(0, 1000);
                     for (int i{0}; i < num_txs; ++i) {
                         auto& tx_to_remove = PickValue(fuzzed_data_provider, tx_history);
+                        const auto tx_weight = GetTransactionWeight(*tx_to_remove);
+                        if (block_weight + tx_weight > MAX_BLOCK_WEIGHT) break;
+                        block_weight += tx_weight;
                         block.vtx.push_back(tx_to_remove);
                     }
                     orphanage->EraseForBlock(block);
@@ -228,7 +230,7 @@ FUZZ_TARGET(txorphan_protected, .init = initialize_orphanage)
     SeedRandomStateForTest(SeedRand::ZEROS);
     FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
     FastRandomContext orphanage_rng{ConsumeUInt256(fuzzed_data_provider)};
-    NodeClockContext clock_ctx{ConsumeTime(fuzzed_data_provider)};
+    FakeNodeClock clock{ConsumeTime(fuzzed_data_provider)};
 
     // We have num_peers peers. Some subset of them will never exceed their reserved weight or announcement count, and
     // should therefore never have any orphans evicted.
@@ -263,8 +265,7 @@ FUZZ_TARGET(txorphan_protected, .init = initialize_orphanage)
     // These are honest peer's live announcements. We expect them to be protected from eviction.
     std::set<Wtxid> protected_wtxids;
 
-    LIMITED_WHILE(outpoints.size() < 400 && fuzzed_data_provider.ConsumeBool(), 1000)
-    {
+    LIMITED_WHILE (outpoints.size() < 400 && fuzzed_data_provider.ConsumeBool(), 1000) {
         // construct transaction
         const CTransactionRef tx = [&] {
             CMutableTransaction tx_mut;
@@ -299,8 +300,7 @@ FUZZ_TARGET(txorphan_protected, .init = initialize_orphanage)
         const auto wtxid{tx->GetWitnessHash()};
 
         // orphanage functions
-        LIMITED_WHILE(fuzzed_data_provider.remaining_bytes(), 10 * global_latency_score_limit)
-        {
+        LIMITED_WHILE (fuzzed_data_provider.remaining_bytes(), 10 * global_latency_score_limit) {
             NodeId peer_id = fuzzed_data_provider.ConsumeIntegralInRange<NodeId>(0, num_peers - 1);
             const auto tx_weight{GetTransactionWeight(*tx)};
 
@@ -562,7 +562,7 @@ FUZZ_TARGET(txorphanage_sim)
     // 5. Run through a scenario of mutators on both real and simulated orphanage.
     //
 
-    LIMITED_WHILE(provider.remaining_bytes() > 0, 200) {
+    LIMITED_WHILE (provider.remaining_bytes() > 0, 200) {
         int command = provider.ConsumeIntegralInRange<uint8_t>(0, 15);
         while (true) {
             if (sim_announcements.size() < MAX_ANN && command-- == 0) {
@@ -594,7 +594,7 @@ FUZZ_TARGET(txorphanage_sim)
                 assert(erased == sim_have);
                 std::erase_if(sim_announcements, [&](auto& ann) { return ann.tx == tx; });
                 break;
-           } else if (command-- == 0) {
+            } else if (command-- == 0) {
                 // EraseForPeer
                 auto peer = read_peer_fn();
                 real->EraseForPeer(peer);

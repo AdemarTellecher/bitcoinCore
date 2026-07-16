@@ -14,12 +14,13 @@
 #include <net_processing.h>
 #include <netmessagemaker.h>
 #include <node/blockstorage.h>
-#include <node/miner.h>
+#include <node/mining_types.h>
 #include <policy/truc_policy.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <protocol.h>
 #include <script/script.h>
+#include <serialize.h>
 #include <sync.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
@@ -36,13 +37,13 @@
 #include <txmempool.h>
 #include <uint256.h>
 #include <util/check.h>
+#include <util/task_runner.h>
 #include <util/time.h>
 #include <util/translation.h>
 #include <validation.h>
 #include <validationinterface.h>
 
 #include <boost/multi_index/detail/hash_index_iterator.hpp>
-#include <boost/operators.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -51,7 +52,7 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -119,9 +120,8 @@ void ResetChainmanAndMempool(TestingSetup& setup)
     setup.m_make_chainman();
     setup.LoadVerifyActivateChainstate();
 
-    node::BlockAssembler::Options options;
+    node::BlockCreateOptions options;
     options.coinbase_output_script = P2WSH_OP_TRUE;
-    options.include_dummy_extranonce = true;
 
     g_mature_coinbase.clear();
 
@@ -135,6 +135,15 @@ void ResetChainmanAndMempool(TestingSetup& setup)
     }
 }
 
+//! Used to run tasks in a std::thread to avoid DEBUG_LOCKORDER false positives.
+class ImmediateBackgroundTaskRunner : public util::TaskRunnerInterface
+{
+public:
+    void insert(std::function<void()> func) override { std::thread(std::move(func)).join(); }
+    void flush() override {}
+    size_t size() override { return 0; }
+};
+
 } // namespace
 
 extern void MakeRandDeterministicDANGEROUS(const uint256& seed) noexcept;
@@ -144,6 +153,8 @@ void initialize_cmpctblock()
     static const auto testing_setup = MakeNoLogFileContext<TestingSetup>();
     g_setup = testing_setup.get();
     g_nBits = Params().GenesisBlock().nBits;
+    // Replace validation_signals before creating chainman and mempool so they use it.
+    testing_setup->m_node.validation_signals = std::make_unique<ValidationSignals>(std::make_unique<ImmediateBackgroundTaskRunner>());
     ResetChainmanAndMempool(*g_setup);
 }
 
@@ -152,7 +163,8 @@ FUZZ_TARGET(cmpctblock, .init = initialize_cmpctblock)
     SeedRandomStateForTest(SeedRand::ZEROS);
     FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
 
-    NodeClockContext clock_ctx{1610000000s};
+    FakeNodeClock clock{1610000000s};
+    FakeSteadyClock steady_clock;
 
     auto setup = g_setup;
     auto& mempool = *setup->m_node.mempool;
@@ -178,7 +190,7 @@ FUZZ_TARGET(cmpctblock, .init = initialize_cmpctblock)
 
     std::vector<CNode*> peers;
     for (int i = 0; i < 4; ++i) {
-        peers.push_back(ConsumeNodeAsUniquePtr(fuzzed_data_provider, i).release());
+        peers.push_back(ConsumeNodeAsUniquePtr(fuzzed_data_provider, steady_clock, i).release());
         CNode& p2p_node = *peers.back();
         FillNode(fuzzed_data_provider, connman, p2p_node);
         connman.AddTestNode(p2p_node);
@@ -311,8 +323,7 @@ FUZZ_TARGET(cmpctblock, .init = initialize_cmpctblock)
         return block_info;
     };
 
-    LIMITED_WHILE(fuzzed_data_provider.ConsumeBool(), 1000)
-    {
+    LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 1000) {
         CSerializedNetMsg net_msg;
         bool sent_net_msg = true;
         bool requested_hb = false;
@@ -442,10 +453,10 @@ FUZZ_TARGET(cmpctblock, .init = initialize_cmpctblock)
             [&]() {
                 // Set mock time randomly or to tip's time.
                 if (fuzzed_data_provider.ConsumeBool()) {
-                    clock_ctx.set(ConsumeTime(fuzzed_data_provider));
+                    clock.set(ConsumeTime(fuzzed_data_provider));
                 } else {
                     const NodeSeconds tip_time = WITH_LOCK(::cs_main, return chainman.ActiveChain().Tip()->Time());
-                    clock_ctx.set(tip_time);
+                    clock.set(tip_time);
                 }
 
                 sent_net_msg = false;
