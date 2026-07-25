@@ -164,7 +164,7 @@ void TestCoinsView(FuzzedDataProvider& fuzzed_data_provider, CCoinsViewCache& co
                     const bool possible_overwrite{coins_view_cache.PeekCoin(outpoint) || fuzzed_data_provider.ConsumeBool()};
                     coins_view_cache.AddCoin(outpoint, std::move(coin), possible_overwrite);
                 } else {
-                    coins_view_cache.EmplaceCoinInternalDANGER(std::move(outpoint), std::move(coin));
+                    coins_view_cache.EmplaceCoinInternalDANGER(outpoint, std::move(coin));
                 }
             },
             [&] {
@@ -245,7 +245,7 @@ void TestCoinsView(FuzzedDataProvider& fuzzed_data_provider, CCoinsViewCache& co
                 sentinel.second.SelfRef(sentinel);
                 size_t dirty_count{0};
                 CCoinsMapMemoryResource resource;
-                CCoinsMap coins_map{0, SaltedOutpointHasher{/*deterministic=*/true}, CCoinsMap::key_equal{}, &resource};
+                CCoinsMap coins_map{0, SaltedCoinsCacheHasher{/*deterministic=*/true}, CCoinsMap::key_equal{}, &resource};
                 LIMITED_WHILE (good_data && fuzzed_data_provider.ConsumeBool(), 10'000) {
                     CCoinsCacheEntry coins_cache_entry;
                     if (fuzzed_data_provider.ConsumeBool()) {
@@ -429,7 +429,7 @@ FUZZ_TARGET(coins_view_db, .init = initialize_coins_view)
 // called.
 FUZZ_TARGET(coins_view_overlay, .init = initialize_coins_view)
 {
-    SeedRandomStateForTest(SeedRand::ZEROS); // for SaltedTxidHasher
+    SeedRandomStateForTest(SeedRand::ZEROS); // for SaltedCoinsCacheHasher
     StartPoolIfNeeded();
     FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
     MutationGuardCoinsViewCache backend_cache{&CoinsViewEmpty::Get(), /*deterministic=*/true};
@@ -441,7 +441,7 @@ FUZZ_TARGET(coins_view_overlay, .init = initialize_coins_view)
 
 FUZZ_TARGET(coins_view_stacked, .init = initialize_coins_view)
 {
-    SeedRandomStateForTest(SeedRand::ZEROS); // for SaltedTxidHasher
+    SeedRandomStateForTest(SeedRand::ZEROS); // for SaltedCoinsCacheHasher
     StartPoolIfNeeded();
     FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
     auto db_params = DBParams{
